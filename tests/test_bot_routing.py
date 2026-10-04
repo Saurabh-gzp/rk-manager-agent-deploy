@@ -70,6 +70,34 @@ class BotRoutingTests(unittest.TestCase):
         answer.assert_not_called()
         self.assertIn("Admin ko bhej diya", send.call_args.args[1])
 
+    def test_llm_gate_answers_when_member_talks_to_bot(self):
+        # "managar mujhse baat kro" — no /ask, no @mention; the LLM gate
+        # decides it is addressed to the bot.
+        patches = self._base_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5] as send, \
+                patch.object(bot, "_should_reply_llm",
+                             return_value=True) as gate, \
+                patch.object(bot.agent, "answer", return_value={
+                    "text": "Haan bolo, kya help chahiye?", "grounded": True,
+                }) as answer:
+            bot.handle_message(message("managar mujhse baat kro"))
+        gate.assert_called_once()
+        answer.assert_called_once()
+        self.assertEqual(send.call_args.args[1], "Haan bolo, kya help chahiye?")
+
+    def test_llm_gate_stays_silent_on_member_chatter(self):
+        patches = self._base_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5] as send, \
+                patch.object(bot, "_should_reply_llm",
+                             return_value=False) as gate, \
+                patch.object(bot.agent, "answer") as answer:
+            bot.handle_message(message("are ye abhi chota bachha hai"))
+        gate.assert_called_once()
+        answer.assert_not_called()
+        send.assert_not_called()
+
     def test_channel_post_ingestion_never_sends_a_message(self):
         with patch.object(bot.links, "is_managed_channel", return_value=True), \
                 patch.object(bot.knowledge, "ingest_channel_post") as ingest, \

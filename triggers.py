@@ -23,6 +23,19 @@ _PLAIN_GREETING = re.compile(
 )
 
 
+def is_plain_chatter(text: str) -> bool:
+    """True for greetings/thanks/acknowledgements with nothing else.
+
+    These never need the bot's reply — checked before the LLM gate so we
+    don't burn an API call on 'hyy' / 'ok' / 'thanks'.
+    """
+    text = (text or "").strip()
+    if not text:
+        return True
+    without_mentions = re.sub(r"@\w+", "", text).strip()
+    return bool(_PLAIN_GREETING.fullmatch(without_mentions))
+
+
 def is_question_or_request(text: str) -> bool:
     """Return True for explicit questions/actions, not greetings or chatter."""
     text = (text or "").strip()

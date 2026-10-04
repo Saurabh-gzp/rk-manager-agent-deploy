@@ -141,6 +141,41 @@ def _is_private_admin(uid: int) -> bool:
     return _is_private_owner(uid) or (bool(uid) and uid == (config.ADMIN_CHAT_ID or 0))
 
 
+_GATE_SYSTEM = (
+    "You are the reply-decision module for RK Manager, an AI assistant in a "
+    "Telegram gaming group. Answer with exactly one word: YES or NO."
+)
+
+
+def _should_reply_llm(text: str, name: str) -> bool:
+    """Decide with the LLM whether RK Manager should reply to a group message.
+
+    True when the member is talking TO the bot / asking it something / the
+    bot's reply is needed. Fail-closed: on any error, stay silent.
+    """
+    prompt = (
+        "A member just wrote this in the group:\n"
+        f"{name}: {text}\n\n"
+        "Should RK Manager (the group's AI assistant) reply? Answer YES if:\n"
+        "- the message is addressed to RK Manager / manager / bot (any spelling, e.g. 'managar'), or\n"
+        "- it asks a question or requests something RK Manager could help with "
+        "(mods, loaders, APKs, BGMI, downloads, group info), or\n"
+        "- it clearly expects the assistant's response.\n"
+        "Answer NO if:\n"
+        "- it is banter, jokes, or chatter between members, or\n"
+        "- it is directed at another member, or\n"
+        "- it is just a greeting, thanks, ok, hmm with nothing else.\n"
+        "Answer with exactly one word: YES or NO."
+    )
+    try:
+        out = ai_engine.get_router().generate(
+            prompt, system=_GATE_SYSTEM, max_tokens=8
+        )
+    except Exception:
+        return False
+    return out.strip().upper().startswith("YES")
+
+
 # ---------------- handlers ----------------
 
 def handle_my_chat_member(update) -> None:
@@ -389,8 +424,9 @@ def handle_message(msg) -> None:
             )
             return
 
-        # Respond to bot mentions, /ask, direct questions, or clear requests;
-        # do not interject in a reply addressed to another group member.
+        # The bot reads EVERY message, but replies only when spoken to or
+        # needed — using its own judgment (LLM gate), not just /ask.
+        # Explicitly directed at the bot: always answer.
         ask_match = _is_ask_command(text)
         is_ask = ask_match is not None
         is_mention = _mentions_bot(text, msg.get("entities") or msg.get("caption_entities") or [])
@@ -398,13 +434,27 @@ def handle_message(msg) -> None:
         reply_user = (reply_to.get("from") or {}).get("id")
         replied_to_bot = bool(reply_user and reply_user == _bot_id())
         entities = msg.get("entities") or msg.get("caption_entities") or []
-        if not (is_ask or is_mention or replied_to_bot or triggers.is_question_or_request(text)):
-            return
-        if not is_mention and not is_ask:
+        directed = is_ask or is_mention or replied_to_bot
+
+        if not directed:
+            # Commands (other than /ask, /admin handled above): ignore.
+            if text.startswith("/"):
+                return
+            # A reply addressed to another member, or mentioning someone
+            # else: not for the bot — stay silent.
             if reply_to and not replied_to_bot:
                 return
             if _mentions_other_user(text, entities):
                 return
+            # Obvious question/request: answer directly (cheap path).
+            if not triggers.is_question_or_request(text):
+                # Plain chatter ("hyy", "ok"): never needs a reply.
+                if triggers.is_plain_chatter(text):
+                    return
+                # Everything else: the bot decides itself with the LLM gate.
+                who = user.get("first_name") or user.get("username") or "member"
+                if not _should_reply_llm(text, who):
+                    return
 
         if is_ask:
             question = text[ask_match.end():].strip()
