@@ -44,16 +44,31 @@ class BotRoutingTests(unittest.TestCase):
         self.assertEqual(answer.call_args.args[0], "What time does it start?")
         self.assertEqual(answer.call_args.args[1]["user_id"], 123)
 
-    def test_unknown_answer_escalates_original_question_and_user(self):
+    def test_no_auto_escalation_bot_replies_itself(self):
         patches = self._base_patches()
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5] as send, \
                 patch.object(bot.agent, "answer", return_value={
-                    "text": "I don't know.", "grounded": False,
-                }), patch.object(bot.escalation, "open_escalation", return_value="abc123") as esc:
+                    "text": "Mera jawab ye hai.", "grounded": False,
+                }), patch.object(bot.escalation, "open_escalation") as esc:
             bot.handle_message(message("When is the next meeting?"))
+        esc.assert_not_called()
+        send.assert_called()
+        self.assertEqual(send.call_args.args[1], "Mera jawab ye hai.")
+
+    def test_admin_command_opens_manual_escalation(self):
+        patches = self._base_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5] as send, \
+                patch.object(bot.escalation, "open_escalation",
+                             return_value="abc123") as esc, \
+                patch.object(bot.agent, "answer") as answer:
+            bot.handle_message(message("/admin mujhe help chahiye"))
         esc.assert_called_once()
         self.assertEqual(esc.call_args.kwargs["user_id"], 123)
-        self.assertEqual(esc.call_args.kwargs["question"], "When is the next meeting?")
+        self.assertEqual(esc.call_args.kwargs["question"], "mujhe help chahiye")
+        answer.assert_not_called()
+        self.assertIn("Admin ko bhej diya", send.call_args.args[1])
 
     def test_channel_post_ingestion_never_sends_a_message(self):
         with patch.object(bot.links, "is_managed_channel", return_value=True), \

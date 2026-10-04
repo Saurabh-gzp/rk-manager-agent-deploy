@@ -357,7 +357,7 @@ def handle_message(msg) -> None:
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
-        _deliver_answer(chat_id, res, escalate=False)
+        _deliver_answer(chat_id, res)
         return
 
     # ---------------- group chat ----------------
@@ -371,6 +371,23 @@ def handle_message(msg) -> None:
             return
         # Learn from every non-command non-bot message
         knowledge.ingest_message(msg)
+
+        # Manual escalation: ONLY when a user explicitly asks for a human.
+        # The bot never escalates on its own anymore.
+        if text.startswith("/admin"):
+            note = text[len("/admin"):].strip()
+            eid = escalation.open_escalation(
+                user_id=uid,
+                user_chat_id=chat_id,
+                question=(note or "(admin se baat karni hai)")[:400],
+                source="group",
+            )
+            tg_api.send_message(
+                chat_id,
+                "✅ Admin ko bhej diya hai — jawab milte hi yahin bata dunga. "
+                f"(ref: {eid[:8]})",
+            )
+            return
 
         # Respond to bot mentions, /ask, direct questions, or clear requests;
         # do not interject in a reply addressed to another group member.
@@ -400,13 +417,7 @@ def handle_message(msg) -> None:
         if not question:
             return
         if triggers.is_group_scan_request(question):
-            _deliver_answer(
-                chat_id,
-                _group_scan_answer(chat_id),
-                escalate=False,
-                user_id=uid,
-                question=question,
-            )
+            _deliver_answer(chat_id, _group_scan_answer(chat_id))
             return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
@@ -416,23 +427,21 @@ def handle_message(msg) -> None:
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
-        _deliver_answer(
-            chat_id, res, escalate=True, user_id=uid, question=question
-        )
+        _deliver_answer(chat_id, res)
         return
 
 
-def _deliver_answer(
-    chat_id: int,
-    res: dict,
-    escalate: bool,
-    user_id: int | None = None,
-    question: str = "",
-) -> None:
-    """Send the answer / file to the user; if not grounded, escalate."""
+def _deliver_answer(chat_id: int, res: dict) -> None:
+    """Send the answer / file to the user.
+
+    The bot ALWAYS replies itself and never escalates automatically.
+    Human escalation is manual only, via the /admin command.
+    """
     text = res.get("text") or ""
     if text:
         tg_api.send_message(chat_id, text)
+    else:
+        tg_api.send_message(chat_id, "🤔 Samajh nahi aaya — thoda detail me pucho.")
 
     # If there's a file offer, send it
     fo = res.get("file_offer")
@@ -442,20 +451,6 @@ def _deliver_answer(
                                  caption=fo.get("caption"))
         except Exception:
             pass
-
-    needs_escalation = res.get("needs_escalation", not res.get("grounded"))
-    if escalate and needs_escalation:
-        eid = escalation.open_escalation(
-            user_id=user_id or 0,
-            user_chat_id=chat_id,
-            question=(question or "(no question)")[:400],
-            source="group" if chat_id < 0 else "private",
-        )
-        if not text:
-            tg_api.send_message(
-                chat_id,
-                f"🤔 Iska jawab mere paas nahi hai. Main admin/owner ko bhej raha hu. (ref: {eid[:8]})"
-            )
 
 
 # ---------------- run modes ----------------

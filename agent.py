@@ -13,11 +13,19 @@ import tg_api
 
 
 SYSTEM_PROMPT = (
-    "You are RK Manager — the AI agent for a Telegram channel + group. "
-    "Answer ONLY using the context below. If the answer is genuinely not in "
-    "the context, say exactly: 'I do not have this information in the channel/group knowledge yet.' "
-    "Reply in the user's language (Hindi, Bengali, Hinglish all ok). "
-    "Be concise and friendly. If the context has a file, mention what it is."
+    "You are RK Manager — the AI agent for a Telegram gaming community "
+    "(BGMI mods, loaders, APKs, tech support). "
+    "Below is context learned from the channel + group. Use it as background "
+    "knowledge, but ALWAYS answer in your own words — NEVER copy-paste lines "
+    "from the context verbatim, even if the user seems to quote them. "
+    "If the context does not contain the answer, use your own general "
+    "knowledge instead of refusing. "
+    "Never invent a specific user's past messages or personal history: if "
+    "asked about someone's past conversation and the context has no record "
+    "of it, say naturally in the user's language that you don't have that "
+    "record — do not refuse with a canned line. "
+    "Reply in the user's language (Hindi, Hinglish ok). Be concise, friendly "
+    "and chat-like — like a group member, not a robot."
 )
 
 GENERAL_PROMPT = (
@@ -28,13 +36,6 @@ GENERAL_PROMPT = (
     "If asked about a person's past messages and there is no matching context, "
     "say you do not have that history."
 )
-
-_PERSONAL_HISTORY_MARKERS = (
-    "meri problem", "my problem", "maine kya", "maine bola", "maine bataya",
-    "pichli baar", "pehle kya", "last time", "previous chat", "remember me",
-    "do you remember", "what did i say", "what was my issue",
-)
-
 
 def _format_context(hits: list[dict]) -> str:
     out: list[str] = []
@@ -89,7 +90,7 @@ def answer(question: str, user_ctx: dict) -> dict:
         prompt = (
             f"Context (learned from channel + group):\n{ctx_block}\n\n"
             f"User question ({user_ctx.get('first_name') or user_ctx.get('username') or 'user'}): {question}\n"
-            "Answer (grounded in context only):"
+            "Answer:"
         )
         try:
             text = ai_engine.get_router().generate(prompt, system=SYSTEM_PROMPT)
@@ -107,16 +108,17 @@ def answer(question: str, user_ctx: dict) -> dict:
                 "sources": len(hits),
                 "error": str(exc)[:200],
             }
-        grounded = "i do not have this information" not in text.casefold()
+        # The bot ALWAYS answers itself — never refuses with a canned line,
+        # never escalates automatically.
         result = {
             "text": text,
-            "grounded": grounded,
+            "grounded": True,
             "sources": len(hits),
-            "needs_escalation": not grounded,
+            "needs_escalation": False,
         }
         # If we also have a related file and the answer mentions it, attach.
         file_hit = _has_file_in_context(hits)
-        if file_hit and grounded and any(w in text.lower() for w in ("file", "download", "bhej", "link", "send", "attached", "document")):
+        if file_hit and any(w in text.lower() for w in ("file", "download", "bhej", "link", "send", "attached", "document")):
             result["file_offer"] = {
                 "file_id": file_hit["file_id"],
                 "file_type": file_hit.get("file_type", "document"),
@@ -124,16 +126,9 @@ def answer(question: str, user_ctx: dict) -> dict:
             }
         return result
 
-    # 3. No matching memory. Avoid fabricating personal history; answer only
-    # ordinary general questions without claiming group-specific knowledge.
-    if any(marker in question.casefold() for marker in _PERSONAL_HISTORY_MARKERS):
-        return {
-            "text": "Mujhe is user ki purani baat ka relevant record nahi mila. Main admin ko poochne ke liye bhej raha hoon.",
-            "grounded": False,
-            "sources": 0,
-            "needs_escalation": True,
-            "error": "no_personal_context",
-        }
+    # 3. No matching memory. Answer from general knowledge — the GENERAL
+    # prompt already forbids fabricating personal history. Never escalate:
+    # the bot always replies itself.
     try:
         text = ai_engine.get_router().generate(
             f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:",
@@ -151,7 +146,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             "text": "AI keys configure nahi hain. Owner se bolo set karein.",
             "grounded": False,
             "sources": 0,
-            "needs_escalation": True,
+            "needs_escalation": False,
             "error": "no_ai_providers",
         }
     except Exception as exc:  # noqa: BLE001
