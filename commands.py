@@ -84,11 +84,15 @@ HELP_TEXT = (
 
 
 def setup_bot_commands() -> None:
-    """Register the Telegram command menu ('/' button UI). Best-effort."""
+    """Register the Telegram command menu ('/' button UI). Best-effort.
+
+    Valid scope types: default, all_private_chats, all_group_chats,
+    all_chat_administrators, chat, chat_administrators, chat_member.
+    """
     try:
         tg_api.set_my_commands(BOT_COMMANDS_PUBLIC, scope="default")
         tg_api.set_my_commands(BOT_COMMANDS_ADMINS + BOT_COMMANDS_PUBLIC,
-                               scope="all_group_admins")
+                               scope="all_chat_administrators")
     except Exception:
         pass
 
