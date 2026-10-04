@@ -98,6 +98,30 @@ class BotRoutingTests(unittest.TestCase):
         answer.assert_not_called()
         send.assert_not_called()
 
+    def test_gate_prompt_includes_recent_conversation(self):
+        # The reported case: bot asked "batao kya help chahiye", owner
+        # replied "me owner hu tum kya mujhe doge" — the gate must see the
+        # follow-up in context.
+        bot._GROUP_CONTEXT.clear()
+        bot._remember(-100123, "RK Manager", "batao kya help chahiye",
+                      is_bot=True)
+        bot._remember(-100123, "Oxsidian X", "ha ab krega baat hogya fix",
+                      is_owner=True)
+        bot._remember(-100123, "Oxsidian X", "me owner hu tum kya mujhe doge",
+                      is_owner=True)
+        with patch.object(bot.ai_engine, "get_router") as router:
+            router.return_value.generate.return_value = "YES"
+            result = bot._should_reply_llm("me owner hu tum kya mujhe doge",
+                                           "Oxsidian X", -100123,
+                                           is_owner=True)
+        self.assertTrue(result)
+        prompt = router.return_value.generate.call_args.args[0]
+        self.assertIn("batao kya help chahiye", prompt)
+        self.assertIn("me owner hu tum kya mujhe doge", prompt)
+        self.assertIn("RK Manager (you)", prompt)
+        self.assertIn("[OWNER]", prompt)
+        bot._GROUP_CONTEXT.clear()
+
     def test_channel_post_ingestion_never_sends_a_message(self):
         with patch.object(bot.links, "is_managed_channel", return_value=True), \
                 patch.object(bot.knowledge, "ingest_channel_post") as ingest, \

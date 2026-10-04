@@ -26,6 +26,7 @@ import sys
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from collections import defaultdict, deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -141,31 +142,62 @@ def _is_private_admin(uid: int) -> bool:
     return _is_private_owner(uid) or (bool(uid) and uid == (config.ADMIN_CHAT_ID or 0))
 
 
+# Recent conversation per chat (member + bot messages), so the reply gate
+# can see follow-ups to the bot's own messages. In-memory only.
+_GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=12))
+
+
+def _remember(chat_id: int, name: str, text: str,
+              is_bot: bool = False, is_owner: bool = False) -> None:
+    text = (text or "").strip()
+    if chat_id and text:
+        _GROUP_CONTEXT[chat_id].append(
+            {"name": name, "text": text[:300], "is_bot": is_bot,
+             "owner": is_owner})
+
+
 _GATE_SYSTEM = (
     "You are the reply-decision module for RK Manager, an AI assistant in a "
     "Telegram gaming group. Answer with exactly one word: YES or NO."
 )
 
 
-def _should_reply_llm(text: str, name: str) -> bool:
+def _should_reply_llm(text: str, name: str, chat_id: int,
+                      is_owner: bool = False) -> bool:
     """Decide with the LLM whether RK Manager should reply to a group message.
 
-    True when the member is talking TO the bot / asking it something / the
-    bot's reply is needed. Fail-closed: on any error, stay silent.
+    The gate sees recent conversation context (including the bot's own
+    messages), so follow-ups like "tum kya mujhe doge" after the bot asked
+    "batao kya help chahiye" are recognised as addressed to the bot.
+    Fail-closed: on any error, stay silent.
     """
+    recent = list(_GROUP_CONTEXT.get(chat_id, []))
+    # The current message was just remembered — exclude it from context.
+    recent = recent[:-1][-8:]
+    lines = []
+    for m in recent:
+        if m["is_bot"]:
+            who = "RK Manager (you)"
+        else:
+            who = m["name"] + (" [OWNER]" if m.get("owner") else "")
+        lines.append(who + ": " + m["text"])
+    convo = "\n".join(lines) if lines else "(no earlier messages)"
+    role = " (group OWNER)" if is_owner else ""
     prompt = (
-        "A member just wrote this in the group:\n"
-        f"{name}: {text}\n\n"
-        "Should RK Manager (the group's AI assistant) reply? Answer YES if:\n"
-        "- the message is addressed to RK Manager / manager / bot (any spelling, e.g. 'managar'), or\n"
-        "- it asks a question or requests something RK Manager could help with "
-        "(mods, loaders, APKs, BGMI, downloads, group info), or\n"
-        "- it clearly expects the assistant's response.\n"
-        "Answer NO if:\n"
-        "- it is banter, jokes, or chatter between members, or\n"
-        "- it is directed at another member, or\n"
-        "- it is just a greeting, thanks, ok, hmm with nothing else.\n"
-        "Answer with exactly one word: YES or NO."
+        "Recent group conversation:\n" + convo + "\n\n"
+        + "New message from " + name + role + ": " + text + "\n\n"
+        + "Should RK Manager (the group's AI assistant -- that's YOU) reply to "
+        + "this new message? Answer YES if:\n"
+        + "- it is addressed to you (RK Manager / manager / bot, any spelling), or\n"
+        + "- it is a follow-up to your previous message, or\n"
+        + "- it asks a question or requests something you could help with "
+        + "(mods, loaders, APKs, BGMI, downloads, group info), or\n"
+        + "- it clearly expects your response.\n"
+        + "Answer NO if:\n"
+        + "- it is banter, jokes, or chatter between members, or\n"
+        + "- it is directed at another member, or\n"
+        + "- it is just a greeting, thanks, ok, hmm with nothing else.\n"
+        + "Answer with exactly one word: YES or NO."
     )
     try:
         out = ai_engine.get_router().generate(
@@ -174,6 +206,7 @@ def _should_reply_llm(text: str, name: str) -> bool:
     except Exception:
         return False
     return out.strip().upper().startswith("YES")
+
 
 
 # ---------------- handlers ----------------
@@ -406,6 +439,9 @@ def handle_message(msg) -> None:
             return
         # Learn from every non-command non-bot message
         knowledge.ingest_message(msg)
+        # Remember for the reply gate's conversation context.
+        _who = user.get("first_name") or user.get("username") or "member"
+        _remember(chat_id, _who, text, is_owner=(uid == config.OWNER_CHAT_ID))
 
         # Manual escalation: ONLY when a user explicitly asks for a human.
         # The bot never escalates on its own anymore.
@@ -451,9 +487,11 @@ def handle_message(msg) -> None:
                 # Plain chatter ("hyy", "ok"): never needs a reply.
                 if triggers.is_plain_chatter(text):
                     return
-                # Everything else: the bot decides itself with the LLM gate.
+                # Everything else: the bot decides itself with the LLM gate
+                # (it sees recent conversation context).
                 who = user.get("first_name") or user.get("username") or "member"
-                if not _should_reply_llm(text, who):
+                if not _should_reply_llm(text, who, chat_id,
+                                         is_owner=(uid == config.OWNER_CHAT_ID)):
                     return
 
         if is_ask:
@@ -491,7 +529,11 @@ def _deliver_answer(chat_id: int, res: dict) -> None:
     if text:
         tg_api.send_message(chat_id, text)
     else:
-        tg_api.send_message(chat_id, "🤔 Samajh nahi aaya — thoda detail me pucho.")
+        text = "🤔 Samajh nahi aaya — thoda detail me pucho."
+        tg_api.send_message(chat_id, text)
+    # Remember the bot's own message for the reply gate's context.
+    if chat_id and chat_id < 0:
+        _remember(chat_id, "RK Manager", text, is_bot=True)
 
     # If there's a file offer, send it
     fo = res.get("file_offer")
