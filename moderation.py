@@ -88,6 +88,68 @@ def matches_term(text: str, terms: list[str] | None = None) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Anti-promotion: members may not advertise their own channels/groups.
+# The linked (managed) channel is allowlisted; everything else is deleted.
+# ---------------------------------------------------------------------------
+_PROMO_URL_RE = re.compile(
+    r"(?:https?://)?(?:t\.me|telegram\.me)/(\+?[A-Za-z0-9_][A-Za-z0-9_+/-]*)",
+    re.IGNORECASE,
+)
+
+
+def _managed_channel_username() -> str | None:
+    """Cached @username of the linked channel (None if unknown)."""
+    import links
+    cid = links.get_channel_id()
+    if not cid:
+        return None
+    cached = get_state("managed_channel_username")
+    if cached:
+        return str(cached)
+    try:
+        info = tg_api.get_chat(cid) or {}
+        username = (info.get("username") or "").strip().lstrip("@")
+        if username:
+            save_state("managed_channel_username", username)
+            return username
+    except Exception:
+        pass
+    return None
+
+
+def find_external_promo(text: str, entities: list | None = None) -> str | None:
+    """Return a promo link if text advertises an external channel/group.
+
+    Returns None when there is no t.me/telegram.me link, or when every link
+    points at the managed (allowlisted) channel.
+    """
+    text = text or ""
+    candidates: list[str] = []
+    for ent in entities or []:
+        if ent.get("type") == "url":
+            start, length = ent.get("offset", 0), ent.get("length", 0)
+            m = _PROMO_URL_RE.search(text[start:start + length])
+            if m and m.group(1) not in candidates:
+                candidates.append(m.group(1))
+    for m in _PROMO_URL_RE.finditer(text):
+        if m.group(1) not in candidates:
+            candidates.append(m.group(1))
+    if not candidates:
+        return None
+    allowed = (_managed_channel_username() or "").casefold()
+    for cand in candidates:
+        low = cand.casefold()
+        # Invite links (+hash / joinchat) can't be mapped to the managed
+        # channel -> treat as external promotion.
+        if low.startswith("+") or low.startswith("joinchat/"):
+            return "t.me/" + cand
+        uname = low.split("/")[0]
+        if not allowed or uname != allowed:
+            return "t.me/" + cand
+    return None
+
+
 def _mute(chat_id: int, user_id: int, minutes: int) -> dict:
     until_date = int(time.time()) + int(minutes) * 60
     return tg_api.restrict_chat_member(
@@ -153,6 +215,42 @@ def handle_group_message(msg: dict) -> bool:
         if delete_failed:
             notice += " Message delete nahi hua—bot ko Delete Messages permission chahiye."
         tg_api.send_message(chat_id, notice)
+        return True
+
+    # External channel/group promotion: delete + warn, repeat -> mute.
+    # The linked channel is allowlisted; owner/admins/bots are never touched.
+    promo = find_external_promo(text, msg.get("entities") or msg.get("caption_entities"))
+    if promo:
+        count = _strike("promo_strike", chat_id, user_id)
+        delete_result = tg_api.delete_message(chat_id, msg.get("message_id"))
+        delete_failed = not delete_result.get("ok")
+        name = (user.get("first_name") or user.get("username") or "Member").strip()
+        if count == 1:
+            notice = (
+                f"🚫 {name}, group me apne channel/group ka promotion allowed nahi hai. "
+                f"Message delete kar diya ({promo}). Dobara kiya to mute kar dunga."
+            )
+        else:
+            mute_result = _mute(chat_id, user_id, MUTE_MINUTES)
+            if mute_result.get("ok"):
+                notice = (
+                    f"⏱ {name} ko bar-bar promotion karne par {MUTE_MINUTES} minute "
+                    f"mute kiya. Real manager ki tarah — pehle samjhaya, phir action."
+                )
+            else:
+                notice = (
+                    f"⚠️ {name}, repeat promotion. Mute apply nahi hua—bot ko "
+                    f"Restrict Members permission chahiye."
+                )
+        if delete_failed:
+            notice += " Message delete nahi hua—bot ko Delete Messages permission chahiye."
+        tg_api.send_message(chat_id, notice)
+        log_action("promo_delete", chat_id, target_id=user_id,
+                   target_name=name, reason=promo)
+        if count > 1:
+            log_action("promo_automute", chat_id, target_id=user_id,
+                       target_name=name, reason=promo,
+                       until=int(time.time()) + MUTE_MINUTES * 60)
         return True
 
     # Owner-configured filters (Rose-style). Same guards as above apply:
