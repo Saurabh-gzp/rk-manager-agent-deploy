@@ -304,3 +304,58 @@ def send_any_file(chat_id: int, file_id: str, file_type: str, caption: str = Non
     if t == "voice":
         return send_voice(chat_id, file_id, caption=caption)
     return send_document(chat_id, file_id, caption=caption)
+
+
+# ---------------------- Power upgrade additions ----------------------
+
+def copy_message(to_chat_id, from_chat_id, message_id, caption=None) -> dict:
+    """Copy a message without the 'Forwarded from' header."""
+    return api("copyMessage", {
+        "chat_id": to_chat_id, "from_chat_id": from_chat_id,
+        "message_id": message_id, "caption": caption,
+    })
+
+
+def pin_chat_message(chat_id, message_id, silent=True) -> dict:
+    return api("pinChatMessage", {
+        "chat_id": chat_id, "message_id": message_id, "silent": silent,
+    })
+
+
+def unpin_chat_message(chat_id, message_id=None) -> dict:
+    p = {"chat_id": chat_id}
+    if message_id:
+        p["message_id"] = message_id
+    return api("unpinChatMessage", p)
+
+
+def unpin_all_chat_messages(chat_id) -> dict:
+    return api("unpinAllChatMessages", {"chat_id": chat_id})
+
+
+def set_my_commands(commands: list, scope: str = "default") -> dict:
+    """Set the bot's command menu (the '/' button UI in Telegram)."""
+    return api("setMyCommands", {
+        "commands": commands,
+        "scope": {"type": scope},
+    })
+
+
+def send_contact(chat_id, phone_number, first_name, last_name=None,
+                 vcard=None, reply_to_message_id=None) -> dict:
+    return api("sendContact", {
+        "chat_id": chat_id,
+        "phone_number": phone_number,
+        "first_name": first_name,
+        "last_name": last_name,
+        "vcard": vcard,
+        "reply_to_message_id": reply_to_message_id,
+    })
+
+
+def set_message_reaction(chat_id, message_id, emoji: str = "👍") -> dict:
+    """React to a message (Bot API 7.0+). Best-effort; ignores errors."""
+    return api("setMessageReaction", {
+        "chat_id": chat_id, "message_id": message_id,
+        "reaction": [{"type": "emoji", "emoji": emoji}],
+    })

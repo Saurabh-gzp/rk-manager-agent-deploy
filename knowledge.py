@@ -29,7 +29,8 @@ def _importance(text: str, file_id: str | None, forwarded: bool, is_question: bo
 # --- file detection ---
 
 def _extract_file(post: dict) -> tuple[str | None, str | None]:
-    for ft in ("document", "video", "audio", "voice", "video_note"):
+    for ft in ("document", "video", "audio", "voice", "video_note",
+               "animation", "sticker"):
         m = post.get(ft)
         if isinstance(m, dict) and m.get("file_id"):
             return m["file_id"], ft
@@ -41,6 +42,19 @@ def _extract_file(post: dict) -> tuple[str | None, str | None]:
         if biggest.get("file_id"):
             return biggest["file_id"], "photo"
     return None, None
+
+
+def _extract_contact(post: dict) -> dict | None:
+    """Channel contacts (vCards) — no file_id, delivered by forwarding."""
+    c = post.get("contact")
+    if isinstance(c, dict) and (c.get("phone_number") or c.get("vcard")):
+        return {
+            "phone_number": c.get("phone_number") or "",
+            "first_name": c.get("first_name") or "Contact",
+            "last_name": c.get("last_name") or "",
+            "vcard": c.get("vcard") or "",
+        }
+    return None
 
 
 # --- ingest ---
@@ -81,6 +95,16 @@ def ingest_channel_post(post: dict) -> None:
     try:
         text = post.get("text") or post.get("caption") or ""
         file_id, file_type = _extract_file(post)
+        contact = _extract_contact(post)
+        if contact:
+            # Contact posts: label from the contact's name so search works.
+            cname = " ".join(x for x in (contact.get("first_name"),
+                                         contact.get("last_name")) if x)
+            if cname and not text:
+                text = f"[contact] {cname} {contact.get('phone_number', '')}".strip()
+            elif cname:
+                text = f"{text} [contact: {cname}]".strip()
+            file_type = "contact"
         doc = {
             "channel_id": (post.get("chat") or {}).get("id"),
             "message_id": post.get("message_id"),
@@ -88,16 +112,17 @@ def ingest_channel_post(post: dict) -> None:
             "caption": post.get("caption"),
             "file_id": file_id,
             "file_type": file_type,
+            "contact": contact,
             "date": post.get("date"),
             "forwarded": bool(post.get("forward_from_chat") or post.get("forward_origin")),
             "importance": _importance(
-                text, file_id,
+                text, file_id or ("yes" if contact else None),
                 bool(post.get("forward_from_chat") or post.get("forward_origin")),
                 "?" in text,
             ),
             "ingested_at": time.time(),
         }
-        if doc["channel_id"] is None or (not text and not file_id):
+        if doc["channel_id"] is None or (not text and not file_id and not contact):
             return
         posts = get_db()["channel_posts"]
         existing = posts.find_one({
@@ -156,20 +181,29 @@ def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict
             message_filter["user_id"] = user_id
             qa_question_filter["user_id"] = user_id
             qa_answer_filter["user_id"] = user_id
+        post_extra = {
+            "file_id": None, "file_type": None,
+            "caption": None, "channel_id": None,
+            "message_id": None, "contact": None,
+        }
         for d in db["messages"].find(message_filter):
             add(d, "message", str(d.get("text", "")), {"chat_id": d.get("chat_id")})
         for d in db["channel_posts"].find({"text": rgx}):
-            add(d, "post", str(d.get("text", "") or d.get("caption") or ""), {
+            row_extra = dict(post_extra)
+            row_extra.update({
                 "file_id": d.get("file_id"), "file_type": d.get("file_type"),
                 "caption": d.get("caption"), "channel_id": d.get("channel_id"),
-                "message_id": d.get("message_id"),
+                "message_id": d.get("message_id"), "contact": d.get("contact"),
             })
+            add(d, "post", str(d.get("text", "") or d.get("caption") or ""), row_extra)
         for d in db["channel_posts"].find({"caption": rgx}):
-            add(d, "post", str(d.get("caption") or d.get("text", "")), {
+            row_extra = dict(post_extra)
+            row_extra.update({
                 "file_id": d.get("file_id"), "file_type": d.get("file_type"),
                 "caption": d.get("caption"), "channel_id": d.get("channel_id"),
-                "message_id": d.get("message_id"),
+                "message_id": d.get("message_id"), "contact": d.get("contact"),
             })
+            add(d, "post", str(d.get("caption") or d.get("text", "")), row_extra)
         for d in db["qa"].find(qa_question_filter):
             add(d, "qa", f"Q: {d.get('question','')}\nA: {d.get('answer','')}", {"chat_id": d.get("chat_id")})
         for d in db["qa"].find(qa_answer_filter):
@@ -186,7 +220,7 @@ def find_file_for(query: str) -> dict | None:
     """Find the most recent channel post that has a file and matches the query."""
     hits = search(query, limit=20)
     for h in hits:
-        if h["kind"] == "post" and h.get("file_id"):
+        if h["kind"] == "post" and (h.get("file_id") or h.get("file_type") == "contact"):
             return h
     return None
 

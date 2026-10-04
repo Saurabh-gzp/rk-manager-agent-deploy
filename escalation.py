@@ -41,6 +41,21 @@ def _get(eid):
     return get_db()["escalations"].find_one(_eid_filter(eid))
 
 
+_STALE_SECONDS = 48 * 3600  # 48 ghante tak pending rahi to auto-expire
+
+
+def _expire_stale() -> None:
+    """Pending escalations older than 48h ko 'expired' mark karo."""
+    try:
+        get_db()["escalations"].update_many(
+            {"status": "pending_admin",
+             "created_ts": {"$lt": time.time() - _STALE_SECONDS}},
+            {"$set": {"status": "expired"}},
+        )
+    except Exception:
+        pass
+
+
 def _admin_id() -> int:
     return config.ADMIN_CHAT_ID or config.OWNER_CHAT_ID or 0
 
@@ -52,6 +67,7 @@ def _owner_id() -> int:
 def open_escalation(user_id: int, user_chat_id: int, question: str,
                     source: str = "private") -> str:
     """Create a new escalation, ping admin first. Returns escalation id."""
+    _expire_stale()
     db = get_db()
     esc = {
         "user_id": user_id,

@@ -150,13 +150,13 @@ class ConversationalModFlowTests(unittest.TestCase):
         synth = synth_calls[0].args[0]
         self.assertEqual(synth["reply_to_message"]["message_id"], 377)
 
-    def test_owner_no_target_falls_through_to_llm(self):
+    def test_owner_no_target_asks_for_target_not_llm(self):
         p = self._patches()
 
         def fake_hmc(msg, uid, cid):
             return (msg.get("text") or "").startswith("/")
 
-        with p[0], p[1], p[2], p[3], p[4], p[5], \
+        with p[0], p[1], p[2], p[3], p[4], p[5] as send, \
                 patch.object(bot.agent, "answer",
                              return_value={"text": "ok"}) as answer, \
                 patch.object(bot.moderation, "handle_mod_command",
@@ -165,7 +165,11 @@ class ConversationalModFlowTests(unittest.TestCase):
             bot.handle_message(self._directed("usko ban kar do", OWNER))
         self.assertFalse(any(c.args[0].get("text", "").startswith("/")
                              for c in hmc.call_args_list))
-        answer.assert_called_once()
+        # No target -> the bot must ASK for the target, never let the
+        # LLM claim the action ("karta hu" fake-claim bug fix).
+        answer.assert_not_called()
+        sent = " ".join(str(c.args[1]) for c in send.call_args_list)
+        self.assertIn("kis par", sent)
 
 
 class PromptGuardrailTests(unittest.TestCase):

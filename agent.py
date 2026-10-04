@@ -11,6 +11,7 @@ from typing import Any
 import ai_engine
 import config
 import knowledge
+import links
 import rules
 import tg_api
 
@@ -21,14 +22,19 @@ _CAPABILITIES = (
     "Your real group moderation tools — never deny having these: "
     "/filter (auto-reply or auto-delete on a word), /filters (list them), "
     "/stop (remove a filter), /mute, /tmute (temp mute like 30m/2h/1d), "
-    "/unmute, /delete (delete a replied message), /ban and /unban "
-    "(OWNER ONLY). Your auto-moderation also acts by itself: abuse words get "
-    "deleted (warn first, mute on repeat — never auto-ban), and filters set "
-    "by the owner trigger automatically. If someone asks about your commands "
-    "or powers, list these briefly and truthfully. Never invent a missing "
-    "ability. "
+    "/unmute, /delete (delete a replied message), /warn /warnings "
+    "/resetwarns (warning system: 3 warns = 1h auto-mute), /purge (bulk "
+    "delete), /pin /unpin, /kick (owner), /ban and /unban (OWNER ONLY), "
+    "/files (list channel files), /stats, /id, /report, /help, /rules, "
+    "/sikhao (owner teaches you tasks). Mute/unmute targets work by REPLY, "
+    "user ID, @username OR plain naam (jaise 'rich'). Your auto-moderation "
+    "also acts by itself: abuse words get deleted (warn first, mute on "
+    "repeat — never auto-ban), and filters set by the owner trigger "
+    "automatically. If someone asks about your commands or powers, list "
+    "these briefly and truthfully. Never invent a missing ability. "
     "You can also SEE photos, LISTEN to voice messages, and WATCH short "
-    "videos users send — they arrive attached to the message, use them."
+    "videos users send — they arrive attached to the message, use them. "
+    "You can deliver files from the linked channel on request."
 )
 
 
@@ -64,11 +70,21 @@ SYSTEM_PROMPT = (
     "'Ruko bhai, dekhta hu', run a deeper search, and ask you again with "
     "fresh results. Use LOOKUP only when a real check is needed, never for "
     "chit-chat. "
-    "Action honesty: you have NO power to delete/mute/ban by writing about "
-    "it. NEVER write 'delete kar diya', 'mute kar diya', 'uda diya' and the "
-    "like — if the owner asked in words, the system executes it for real "
-    "separately; you just reply normally. If a member asks you to act against "
+    "Action honesty — CRITICAL: you have NO power to delete/mute/ban/"
+    "unmute/pin/kick by writing about it. NEVER write 'delete kar diya', "
+    "'mute kar diya', 'unmute kar diya', 'uda diya' — and NEVER promise "
+    "future actions like 'karta hu', 'kar dunga', 'nikal dunga', 'uda "
+    "dunga'. If the owner asks you in WORDS to act on someone (mute/unmute/"
+    "delete/kick), the SYSTEM turns it into a real command and executes it "
+    "separately — you do NOT confirm it happened; if the system executed "
+    "it, a separate system notice will announce the real result. If no "
+    "system notice appeared, the action did NOT happen — reply by telling "
+    "the owner to tag the user, reply to their message, or use the exact "
+    "command (e.g. '/unmute rich'). If a member asks you to act against "
     "someone, refuse briefly: ye sirf owner ke kehne pe hota hai. "
+    "Channels: you NEVER post to the channel on your own — not now, not "
+    "later, not even if asked by a member; only the owner's explicit /post "
+    "command posts there. "
     "Standing rules: the OWNER may teach you permanent instructions (e.g. "
     "'agar koi bole app install nahi ho raha to Play Protect OFF karna "
     "sikhana'). When the OWNER gives you such a standing rule in chat, "
@@ -143,7 +159,8 @@ def _format_context(hits: list[dict]) -> str:
 
 def _has_file_in_context(hits: list[dict]) -> dict | None:
     for h in hits:
-        if h.get("kind") == "post" and h.get("file_id"):
+        if h.get("kind") == "post" and (h.get("file_id")
+                                        or h.get("file_type") == "contact"):
             return h
     return None
 
@@ -241,6 +258,39 @@ def _generate_answer(prompt: str, system: str, user_ctx: dict) -> str:
     return ai_engine.get_router().generate(prompt, system=system)
 
 
+def _deliver_channel_item(chat_id: int, item: dict) -> dict:
+    """Deliver a channel item to a chat: file, media, or contact.
+
+    Contacts (vCards) have no file_id — they are delivered by forwarding
+    the original channel post, or by sending the stored contact card.
+    """
+    file_id = item.get("file_id")
+    if file_id:
+        cap = (item.get("caption") or item.get("text")
+               or "Channel se file")[:1000]
+        return tg_api.send_any_file(chat_id, file_id,
+                                    item.get("file_type") or "document",
+                                    caption=cap)
+    # Contact / forward-only post
+    ch = item.get("channel_id") or links.get_channel_id()
+    mid = item.get("message_id")
+    if ch and mid:
+        r = tg_api.forward_message(chat_id, ch, mid)
+        if r.get("ok"):
+            return r
+        r = tg_api.copy_message(chat_id, ch, mid)
+        if r.get("ok"):
+            return r
+    contact = item.get("contact") or {}
+    if contact.get("phone_number"):
+        return tg_api.send_contact(
+            chat_id, contact["phone_number"],
+            contact.get("first_name") or "Contact",
+            last_name=contact.get("last_name") or None,
+            vcard=contact.get("vcard") or None)
+    return {"ok": False, "description": "item not deliverable"}
+
+
 def answer(question: str, user_ctx: dict) -> dict:
     """Return dict:
         {text, grounded, sources, provider, file: optional, error: optional}
@@ -251,11 +301,10 @@ def answer(question: str, user_ctx: dict) -> dict:
         # Send the file in the user_ctx["chat_id"]
         chat_id = user_ctx.get("chat_id")
         if chat_id:
-            cap = (file_hit.get("caption") or file_hit.get("text") or "Channel se file")[:1000]
-            r = tg_api.send_any_file(chat_id, file_hit["file_id"], file_hit.get("file_type", "document"), caption=cap)
+            r = _deliver_channel_item(chat_id, file_hit)
             if r.get("ok"):
                 return {
-                    "text": "File bhej diya hai — channel se 📎",
+                    "text": "Bhej diya — channel se 📎",
                     "grounded": True,
                     "sources": 1,
                     "file_sent": True,
@@ -309,11 +358,14 @@ def answer(question: str, user_ctx: dict) -> dict:
             result["interim"] = interim
         # If we also have a related file and the answer mentions it, attach.
         file_hit = _has_file_in_context(hits)
-        if file_hit and any(w in text.lower() for w in ("file", "download", "bhej", "link", "send", "attached", "document")):
+        if file_hit and any(w in text.lower() for w in ("file", "download", "bhej", "link", "send", "attached", "document", "contact", "number")):
             result["file_offer"] = {
-                "file_id": file_hit["file_id"],
+                "file_id": file_hit.get("file_id"),
                 "file_type": file_hit.get("file_type", "document"),
                 "caption": (file_hit.get("caption") or "")[:200],
+                "channel_id": file_hit.get("channel_id"),
+                "message_id": file_hit.get("message_id"),
+                "contact": file_hit.get("contact"),
             }
         return result
 

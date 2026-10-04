@@ -1,32 +1,76 @@
-# RK Manager Agent 🤖
+# RK Manager Agent 🤖 v2
 
 Advanced Telegram AI agent — manages your **channel + group**, learns from
-chats, replies from learned content, escalates to admin then owner when stuck.
+chats, replies from learned content, and acts like a real group manager.
 
 ## Kya karta hai
 
 - **Seekhta hai**: Group chats + channel posts MongoDB me save. MongoDB unavailable ho to RAM fallback use hota hai; restart par us fallback ka data lost hota hai.
-- **Jawab deta hai**: Group me natural sawal/request, `/ask <sawal>`, ya bot mention ka jawab deta hai. Plain greetings/chatter par interrupt nahi karta; reply kisi aur member ko ho to ignore karta hai. File maango to direct channel se bhej dega.
-- **Read-only channel**: Bot channel posts read/index karta hai, kabhi channel par post nahi karta. Bot ko channel admin rakho; `Post Messages` permission OFF rakh sakte ho.
+- **Jawab deta hai**: Group me natural sawal/request, `/ask <sawal>`, ya bot mention ka jawab deta hai. Plain greetings/chatter par interrupt nahi karta; reply kisi aur member ko ho to ignore karta hai. File maango to direct channel se bhej dega. **Har group reply user ke message ka REPLY hota hai** — thread me dikhta hai kis baat ka jawab hai.
+- **Read-only channel**: Bot channel posts read/index karta hai, **khud se KABHI channel par post nahi karta**. Sirf owner ke DM command `/post <message>` par channel me post hota hai.
 - **Group scan**: “group status”, “permissions”, “member count” jaisi request par Telegram se live bot membership/permissions check karta hai; result fail ho to claim nahi karta.
 - **Per-user memory**: Group message history sirf usi Telegram user ke answers me search hoti hai; inactive user ka stored history 180 din ke baad clear hota hai.
-- **Moderation**: Owner DM commands se terms add/remove/list aur moderation toggle hota hai. Match par message delete + warning; 24 ghante me repeat par 10-minute mute. Ban kabhi nahi hota. Bot ko `Delete Messages` aur `Restrict Members` permissions chahiye.
-- **2-level escalation**: User → ADMIN pehle → OWNER last resort. Admin "owner ko forward" button se escalate kare.
-- **Owner DM panel** (`/start`):
-  - ➕ Group Admin / ➕ Channel Admin
-  - 🔗 Link Group ↔ Channel
-  - 🤖 Choose Model (saare Gemini models inline buttons)
-  - 🔑 API Keys (Gemini + DeepSeek, status, test, reset)
-  - 🧠 Memory Cleanup (prune, reconcile, forget)
-  - ➕ Add bot to group/channel (Rose-style deep link)
-  - 📊 Stats / ❓ Help
+- **Moderation (smart catch)**: Gaaliyon ki evasive spellings bhi pakdi jati hain — `madharchood`, `m@darch0d`, `b.h.o.s.d.a` sab fuzzy match se delete. Warn first, repeat par 10-min mute, ban kabhi nahi (sirf owner `/ban`).
+- **2-level escalation**: User → ADMIN pehle → OWNER last resort. Admin "owner ko forward" button se escalate kare. 48 ghante pending escalation auto-expire.
+- **Owner DM panel** (`/start`): Group/Channel admin add, link, model choose, API keys, memory cleanup, deep-link add buttons, stats aur help.
 - **Multi-AI rotation**: Gemini (7-8 keys) + DeepSeek (backup). Random provider + random key. Fail pe next key with backoff.
 - **Self-cleanup**: TTL + importance score + channel reconciliation (deleted posts auto-detect).
 - **Auto-link**: Group/Channel add hone par auto-set + announce.
+- **Telegram command menu**: Startup par `setMyCommands` — '/' button me sab commands dikhte hain (members + admins ke liye alag scope).
 
 ## Default model
 
 `gemini-3.5-flash-lite` — panel se change kar sakte ho.
+
+## Commands
+
+**Sab members (group):**
+
+| Command | Kaam |
+|---|---|
+| `/ask <sawal>` | Bot se kuch bhi pucho |
+| `/help` | Poora command menu |
+| `/files [query]` | Channel files/media list |
+| `/id` | Chat/user ID info |
+| `/stats` | Group stats (members, top talkers) |
+| `/report` | Replied message admin ko report |
+| `/rules` | Standing rules |
+| `/admin <note>` | Admin se baat |
+
+**Owner/admin (group):**
+
+| Command | Kaam |
+|---|---|
+| `/mute /unmute` | Reply, ID, @username YA **naam** se (`unmute rich ko`) |
+| `/tmute 30m\|2h\|1d` | Temporary mute |
+| `/warn /warnings /resetwarns` | Warning system — 3 warn par 1hr auto-mute |
+| `/delete` | Replied message delete |
+| `/purge [n]` | Reply se lekar command tak bulk delete (max 100) |
+| `/pin /unpin [all]` | Message pin/unpin |
+| `/filter <word> [reply]` | Word filter (auto-reply ya auto-delete) |
+| `/filters / /stop / /stopall` | Filter manage |
+| `/modlog` | Recent mod actions |
+| `/kick` | Member bahar (owner only; link se wapas aa sakta) |
+| `/ban / /unban` | Ban/unban (owner only) |
+
+**Owner teaching system (group):**
+
+| Command | Kaam |
+|---|---|
+| `/yaad <baat>` | Hamesha follow karne wali instruction |
+| `/sikhao <trigger> :: <reply>` | Jab koi `<trigger>` bole to bot `<reply>` bolega |
+| `/sikhao <trigger> :: file <naam>` | Jab koi `<trigger>` bole to channel se file milegi |
+| `/sikhai` | Sikhaaye hue tasks ki list |
+| `/bhulo <trigger>` | Sikhaaya hua task bhul jao |
+
+**Owner DM:** `/start` (panel), `/post <message>` (channel post — **sirf owner ke kehne par**), `/mod_add|/mod_remove|/mod_list`, `/mod_on|/mod_off`, `/mute <id> [min]`, `/status`, `/yaad`, `/rules`, `/bhul`.
+
+## Action honesty (important design)
+
+Bot kabhi bhi `"karta hu"` / `"kar diya"` jaisa **fake action claim nahi karta**.
+Agar owner bolke action bole to system use REAL command me convert karta hai
+aur ASLI result (success/fail) report hota hai. Target na mile to bot target
+puuchta hai — LLM ko action claim karne ka mauka hi nahi milta.
 
 ## Setup (Render pe deploy)
 
@@ -94,6 +138,8 @@ python3 bot.py
 | `knowledge.py` | Ingest, search, importance, prune, reconcile |
 | `agent.py` | Q&A + file delivery |
 | `triggers.py` | Low-noise natural question/request detection |
+| `commands.py` | Public commands: /help /id /stats /files /report + bot menu |
+| `teach.py` | Owner teaching system (/sikhao /sikhai /bhulo) |
 | `moderation.py` | Owner-controlled word moderation; no-ban |
 | `escalation.py` | 2-level user→admin→owner escalation |
 | `links.py` | Group↔Channel linking |

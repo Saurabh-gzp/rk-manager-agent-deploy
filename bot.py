@@ -42,6 +42,8 @@ import links  # noqa: E402
 import moderation  # noqa: E402
 import triggers  # noqa: E402
 import rules  # noqa: E402
+import commands  # noqa: E402
+import teach  # noqa: E402
 
 
 def log(*args):
@@ -153,9 +155,9 @@ _GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=12))
 # spoken request is turned into a REAL command and run through the same
 # pipeline as /commands (never faked by just saying so).
 _MOD_REQUEST_RE = re.compile(r"""
-    \b(hatao|udao|mitao)\b
-    | \b(delete|del|remove|uda|hata|mita|mute|unmute|ban)\w*\b.{0,25}\b(kar|karo|kr|krdo|kardo|de|do|dijiye)\b
-    | \b(kar|karo|kr|krdo|kardo|de|do)\b.{0,25}\b(delete|del|remove|uda|hata|mita|mute|unmute|ban)\w*\b
+    \b(hatao|udao|mitao|nikal|bahar)\b
+    | \b(delete|del|remove|uda|hata|mita|mute|unmute|ban|unban|kick)\w*\b.{0,25}\b(kar|karo|kr|krdo|kardo|de|do|dijiye)\b
+    | \b(kar|karo|kr|krdo|kardo|de|do|dijiye)\b.{0,25}\b(delete|del|remove|uda|hata|mita|mute|unmute|ban|unban|kick)\w*\b
 """, re.IGNORECASE | re.VERBOSE)
 
 
@@ -203,7 +205,8 @@ def _synthesize_owner_command(text: str, msg: dict, chat_id: int) -> dict | None
     """Turn the owner's spoken mod request into a real command message.
 
     Returns a synthetic msg for moderation.handle_mod_command, or None when
-    there is no clear action+target (then the LLM handles it conversationally).
+    there is no clear action+target (then the bot asks for a target — the
+    LLM must NEVER claim the action).
     """
     if not _looks_like_mod_request(text):
         return None
@@ -216,6 +219,8 @@ def _synthesize_owner_command(text: str, msg: dict, chat_id: int) -> dict | None
         cmd = "unban"
     elif "ban" in low:
         cmd = "ban"
+    elif "kick" in low or "nikal" in low or "bahar" in low:
+        cmd = "kick"
     else:
         cmd = "delete"
 
@@ -239,19 +244,42 @@ def _synthesize_owner_command(text: str, msg: dict, chat_id: int) -> dict | None
             return synth
         return None
 
-    # User-targeted commands need a reply or an ID/@username token.
-    # Never treat the bot's own mention as the target.
+    # User-targeted commands need a reply, an ID/@username token, or a NAME
+    # ('rich ko unmute kar do'). Never treat the bot's own mention as target.
     target_token = None
+    _ACTION_WORDS = {
+        "mute", "unmute", "ban", "unban", "delete", "del", "kick",
+        "purge", "pin", "unpin", "warn", "block", "remove",
+        "udao", "uda", "hatao", "hata", "mitao", "mita", "nikal",
+        "bahar", "kickr", "band", "khol",
+    }
     if (reply.get("from") or {}).get("id"):
         synth["reply_to_message"] = reply
     else:
         uname = _bot_username()
         clean = re.sub(rf"@{re.escape(uname)}\b", "", text or "",
                        flags=re.IGNORECASE).strip() if uname else (text or "")
+        # 1) explicit @username or numeric ID
         m = re.search(r"(?:^|\s)(@\w+|\d{6,})", clean)
-        if not m:
+        if m:
+            target_token = m.group(1)
+        else:
+            # 2) '<naam> ko' pattern — 'unmute rich ko'
+            m = re.search(r"(?:^|\s)([a-zA-Z][\w.-]{1,30})\s+ko\b", clean,
+                          re.IGNORECASE)
+            if not m:
+                # 3) strip filler + action words; jo ek alphabetic token
+                # bachega wahi naam hai
+                words = re.findall(r"[a-zA-Z][\w.-]{1,30}", clean)
+                leftover = [w for w in words
+                            if w.lower() not in moderation._STOPWORDS_TARGET
+                            and w.lower() not in _ACTION_WORDS]
+                if len(leftover) == 1:
+                    m = re.match(r"(.+)", leftover[0])
+            if m and m.group(1).lower() not in _ACTION_WORDS:
+                target_token = m.group(1)
+        if not target_token:
             return None
-        target_token = m.group(1)
 
     if cmd == "mute":
         dur = _spoken_duration(text)
@@ -260,11 +288,73 @@ def _synthesize_owner_command(text: str, msg: dict, chat_id: int) -> dict | None
         synth["text"] = "/unmute"
     elif cmd == "ban":
         synth["text"] = "/ban"
+    elif cmd == "kick":
+        synth["text"] = "/kick"
     else:  # unban
         synth["text"] = "/unban"
     if target_token:
         synth["text"] += f" {target_token}"
     return synth
+
+
+def _handle_owner_channel_post(msg: dict, chat_id: int, text: str) -> bool:
+    """Owner DM: /post <text> — linked channel me post (owner ONLY).
+
+    Bot khud se kabhi channel me post nahi karta — ye ek matra rasta hai,
+    aur wo bhi owner ke explicit command par. Media/forward bhi chalega:
+    /post photo <caption> ke sath photo bhejo DM me.
+    """
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].split("@", 1)[0].lower()
+    if cmd != "/post":
+        return False
+    channel_id = links.get_channel_id()
+    if not channel_id:
+        tg_api.send_message(
+            chat_id, "❌ Koi channel link nahi hai. Panel → 🔗 Link Channel "
+                    "se channel set karo (ya channel me bot ko admin banao).")
+        return True
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    kinds = _media_kinds(msg)
+    if not arg and not kinds:
+        tg_api.send_message(
+            chat_id, "Usage: /post <message>\n"
+                    "Photo/video/file bhi bhej sakte ho: media attach karke "
+                    "/post <caption> likho.\n\n⚠️ Ye channel me seedha post "
+                    "ho jayega — bot sirf tumhare kehne par post karta hai.")
+        return True
+    caption = arg or None
+    if kinds:
+        # Owner ne media bheja hai — channel me as-is post karo.
+        try:
+            if msg.get("photo"):
+                biggest = max(msg["photo"],
+                              key=lambda p: p.get("file_size") or 0)
+                r = tg_api.send_photo(channel_id, biggest["file_id"],
+                                      caption=caption)
+            elif (msg.get("video") or {}).get("file_id"):
+                r = tg_api.send_video(channel_id, msg["video"]["file_id"],
+                                      caption=caption)
+            elif (msg.get("document") or {}).get("file_id"):
+                r = tg_api.send_document(channel_id,
+                                         msg["document"]["file_id"],
+                                         caption=caption)
+            elif (msg.get("audio") or {}).get("file_id"):
+                r = tg_api.send_audio(channel_id, msg["audio"]["file_id"],
+                                      caption=caption)
+            else:
+                r = {"ok": False, "description": "unsupported media"}
+        except Exception:
+            r = {"ok": False, "description": "send failed"}
+    else:
+        r = tg_api.send_message(channel_id, arg)
+    if r.get("ok"):
+        tg_api.send_message(chat_id, "✅ Channel pe post ho gaya.")
+    else:
+        tg_api.send_message(
+            chat_id, f"❌ Channel post fail: "
+                    f"{r.get('description') or 'bot ko channel me Post Messages permission chahiye'}")
+    return True
 
 
 def _handle_rule_command(msg: dict, uid: int, chat_id: int, text: str) -> bool:
@@ -723,6 +813,11 @@ def handle_message(msg) -> None:
                 if cleared else "Koi pending mode nahi tha 🙂",
             )
             return
+        # /post <text> — OWNER-ONLY channel posting. Bot kabhi bhi channel
+        # me apne aap post nahi karta; sirf is command par.
+        if is_owner and text.lower().startswith("/post"):
+            if _handle_owner_channel_post(msg, chat_id, text):
+                return
         # /forget
         if is_owner and text.startswith("/forget"):
             if owner_panel.handle_forget_command(msg):
@@ -780,6 +875,18 @@ def handle_message(msg) -> None:
                   text or " ".join(_MEDIA_KIND_LABEL[k] for k in _media_kinds(msg)),
                   is_owner=(uid == config.OWNER_CHAT_ID))
 
+        # Owner-taught auto-actions ('/sikhao' system) fire on normal
+        # messages BEFORE any gate — jo sikhaya gaya hai wahi hoga.
+        if teach.handle_teach_command(msg, uid, chat_id):
+            return
+        if not text.startswith("/") and teach.match_and_act(msg, chat_id):
+            return
+
+        # Public utility commands: /help /id /stats /files /report —
+        # sab members use kar sakte hain.
+        if commands.handle_public_command(msg, uid, chat_id):
+            return
+
         # Manual escalation: ONLY when a user explicitly asks for a human.
         # The bot never escalates on its own anymore.
         if text.startswith("/admin"):
@@ -794,6 +901,7 @@ def handle_message(msg) -> None:
                 chat_id,
                 "✅ Admin ko bhej diya hai — jawab milte hi yahin bata dunga. "
                 f"(ref: {eid[:8]})",
+                reply_to_message_id=msg.get("message_id"),
             )
             return
 
@@ -845,17 +953,24 @@ def handle_message(msg) -> None:
         # their word — only the owner can. The owner's spoken request becomes
         # a REAL command through the same pipeline (never faked).
         if _looks_like_mod_request(text):
+            mid = msg.get("message_id")
             if uid != config.OWNER_CHAT_ID:
                 _deliver_answer(chat_id, {
                     "text": "Bhai, delete/mute/ban ye sab sirf owner ke kehne pe karta hu — "
                             "kisi member ke bolne pe kisi pe action nahi lunga. 🙂",
-                })
+                }, reply_to=mid)
                 return
             synth = _synthesize_owner_command(text, msg, chat_id)
             if synth and moderation.handle_mod_command(synth, uid, chat_id):
                 return
-            # No clear action+target: fall through to the LLM, which is
-            # instructed never to claim it performed an action.
+            # No clear action+target: NEVER let the LLM claim the action.
+            # Seedha pucho — kisko? Reply/tag/naam batao.
+            _deliver_answer(chat_id, {
+                "text": "Haan bhai, kar dunga — par kis par? 🤔\n"
+                        "Uske kisi message pe REPLY karke bolo, ya @username "
+                        "tag karo, ya naam batao (jaise 'rich ko unmute kar do').",
+            }, reply_to=mid)
+            return
 
         if is_ask:
             question = text[ask_match.end():].strip()
@@ -873,12 +988,14 @@ def handle_message(msg) -> None:
         if not question:
             return
         if triggers.is_group_scan_request(question):
-            _deliver_answer(chat_id, _group_scan_answer(chat_id))
+            _deliver_answer(chat_id, _group_scan_answer(chat_id),
+                            reply_to=msg.get("message_id"))
             return
         # Download attached media (only now — not for ignored messages).
         media, media_err = _download_media(msg) if kinds else ([], None)
         if media_err:
-            _deliver_answer(chat_id, {"text": f"⚠️ {media_err}"})
+            _deliver_answer(chat_id, {"text": f"⚠️ {media_err}"},
+                            reply_to=msg.get("message_id"))
             return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
@@ -891,11 +1008,11 @@ def handle_message(msg) -> None:
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
-        _deliver_answer(chat_id, res)
+        _deliver_answer(chat_id, res, reply_to=msg.get("message_id"))
         return
 
 
-def _deliver_answer(chat_id: int, res: dict) -> None:
+def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> None:
     """Send the answer / file to the user.
 
     The bot ALWAYS replies itself and never escalates automatically.
@@ -903,9 +1020,15 @@ def _deliver_answer(chat_id: int, res: dict) -> None:
     The answer may contain several messages separated by a line with
     only <SPLIT> — each is sent (and remembered) as its own message,
     like a human manager would.
+    Group me jawab hamesha user ke message ka REPLY hota hai — taaki
+    sabko dikhe kis baat ka jawab hai.
     """
     def _send_and_remember(part: str) -> None:
-        tg_api.send_message(chat_id, part)
+        r = tg_api.send_message(chat_id, part,
+                                reply_to_message_id=reply_to)
+        if not r.get("ok"):
+            # reply target gayab ho to plain send (never lose the answer)
+            tg_api.send_message(chat_id, part)
         # Remember the bot's own message for the reply gate's context.
         if chat_id and chat_id < 0:
             _remember(chat_id, "RK Manager", part, is_bot=True)
@@ -926,12 +1049,11 @@ def _deliver_answer(chat_id: int, res: dict) -> None:
     elif not interim:
         _send_and_remember("🤔 Samajh nahi aaya — thoda detail me pucho.")
 
-    # If there's a file offer, send it
+    # If there's a file offer, send it (files, media, contacts — channel se)
     fo = res.get("file_offer")
     if fo:
         try:
-            tg_api.send_any_file(chat_id, fo["file_id"], fo.get("file_type", "document"),
-                                 caption=fo.get("caption"))
+            agent._deliver_channel_item(chat_id, fo)
         except Exception:
             pass
 
@@ -1060,6 +1182,12 @@ def main() -> None:
         "storage=MongoDB (persistent)" if db.is_persistent()
         else "storage=in-memory (volatile; restart loses stored data)"
     )
+    # Telegram command menu (the '/' button) register karo — best-effort.
+    try:
+        commands.setup_bot_commands()
+        log("bot command menu registered")
+    except Exception:
+        log("command menu registration failed (non-fatal)")
     if config.WEBHOOK_URL:
         run_webhook()
     else:
