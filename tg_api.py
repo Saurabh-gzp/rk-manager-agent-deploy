@@ -178,6 +178,32 @@ def delete_message(chat_id, message_id) -> dict:
     return api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
 
+def get_file(file_id) -> dict:
+    if not file_id:
+        return {"ok": False, "description": "file_id is required"}
+    return api("getFile", {"file_id": file_id})
+
+
+def download_file(file_id, max_bytes: int = 15 * 1024 * 1024) -> bytes | None:
+    """Download a Telegram file's bytes. None on failure or over max_bytes."""
+    try:
+        info = get_file(file_id) or {}
+        result = info.get("result") or {}
+        path = result.get("file_path")
+        size = result.get("file_size") or 0
+        if not path or size > max_bytes:
+            return None
+        url = f"https://api.telegram.org/file/bot{_resolve_token()}/{path}"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = resp.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+        return data
+    except Exception:
+        return None
+
+
 def restrict_chat_member(chat_id, user_id, permissions, until_date=None) -> dict:
     return api("restrictChatMember", {
         "chat_id": chat_id,

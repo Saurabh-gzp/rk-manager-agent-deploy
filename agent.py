@@ -26,7 +26,9 @@ _CAPABILITIES = (
     "deleted (warn first, mute on repeat — never auto-ban), and filters set "
     "by the owner trigger automatically. If someone asks about your commands "
     "or powers, list these briefly and truthfully. Never invent a missing "
-    "ability."
+    "ability. "
+    "You can also SEE photos, LISTEN to voice messages, and WATCH short "
+    "videos users send — they arrive attached to the message, use them."
 )
 
 
@@ -221,6 +223,24 @@ def _extract_rule(text: str | None, user_ctx: dict) -> tuple[str | None, int]:
     return text, saved
 
 
+_MEDIA_NOTE = {
+    "photo": "ek photo (image)",
+    "voice": "ek voice message (audio)",
+    "video": "ek video",
+}
+
+
+def _generate_answer(prompt: str, system: str, user_ctx: dict) -> str:
+    """Generate via the router; uses Gemini multimodal when media attached."""
+    media = user_ctx.get("media") or []
+    if media:
+        kinds = ", ".join(_MEDIA_NOTE.get(m.get("kind"), "media") for m in media)
+        prompt = (f"[User ne {kinds} bheja hai — use dhyan se dekh/sun ke jawab do. "
+                  f"User ka sawal/caption neeche hai.]\n\n" + prompt)
+        return ai_engine.get_router().generate_mm(prompt, media, system=system)
+    return ai_engine.get_router().generate(prompt, system=system)
+
+
 def answer(question: str, user_ctx: dict) -> dict:
     """Return dict:
         {text, grounded, sources, provider, file: optional, error: optional}
@@ -259,7 +279,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             "Answer:"
         )
         try:
-            text = ai_engine.get_router().generate(prompt, system=SYSTEM_PROMPT)
+            text = _generate_answer(prompt, SYSTEM_PROMPT, user_ctx)
             text, interim = _maybe_deep_lookup(text, question, user_ctx,
                                                SYSTEM_PROMPT)
             text, _ = _extract_rule(text, user_ctx)
@@ -308,7 +328,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
             + f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:"
         )
-        text = ai_engine.get_router().generate(qprompt, system=GENERAL_PROMPT)
+        text = _generate_answer(qprompt, GENERAL_PROMPT, user_ctx)
         text, interim = _maybe_deep_lookup(text, question, user_ctx,
                                            GENERAL_PROMPT)
         text, _ = _extract_rule(text, user_ctx)

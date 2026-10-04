@@ -113,14 +113,8 @@ def _extract_gemini_text(result: dict) -> str:
     return ""
 
 
-def _gemini_call(key: str, model: str, prompt: str, system: str | None,
-                 max_tokens: int, timeout: int) -> tuple[str, str]:
-    """Return (text, error). Empty text + non-empty error means failure."""
-    full_prompt = (f"{system.strip()}\n\n{prompt.strip()}" if system else prompt)
-    body = {
-        "contents": [{"parts": [{"text": full_prompt}]}],
-        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7},
-    }
+def _gemini_post(key: str, model: str, body: dict, timeout: int) -> tuple[str, str]:
+    """POST a generateContent body. Return (text, error)."""
     url = f"{GEMINI_BASE}/{model}:generateContent?key={key}"
     status, payload, err = _post_json(url, body, {"Content-Type": "application/json"}, timeout)
     if err:
@@ -132,6 +126,39 @@ def _gemini_call(key: str, model: str, prompt: str, system: str | None,
     if not text:
         return "", "empty response"
     return text, ""
+
+
+def _gemini_call(key: str, model: str, prompt: str, system: str | None,
+                 max_tokens: int, timeout: int) -> tuple[str, str]:
+    """Return (text, error). Empty text + non-empty error means failure."""
+    full_prompt = (f"{system.strip()}\n\n{prompt.strip()}" if system else prompt)
+    body = {
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7},
+    }
+    return _gemini_post(key, model, body, timeout)
+
+
+def _gemini_call_mm(key: str, model: str, prompt: str, system: str | None,
+                    max_tokens: int, timeout: int,
+                    media: list[dict] | None) -> tuple[str, str]:
+    """Multimodal generateContent. media items: {mime_type, data (base64), kind}.
+
+    DeepSeek has no vision/audio — this is Gemini-only by design.
+    """
+    parts: list[dict] = []
+    if system and system.strip():
+        parts.append({"text": system.strip()})
+    parts.append({"text": prompt.strip()})
+    for m in media or []:
+        mt, data = m.get("mime_type"), m.get("data")
+        if mt and data:
+            parts.append({"inline_data": {"mime_type": mt, "data": data}})
+    body = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7},
+    }
+    return _gemini_post(key, model, body, timeout)
 
 
 def _deepseek_call(key: str, model: str, prompt: str, system: str | None,
@@ -233,6 +260,32 @@ class AIRouter:
                 prov.pool.report_dead(key)
                 last_err = f"{prov.name}: {err}"
         raise RuntimeError(f"all AI providers failed: {last_err}")
+
+    def generate_mm(self, prompt: str, media: list[dict],
+                    system: str | None = None, max_tokens: int = 1024,
+                    timeout: int | None = None) -> str:
+        """Multimodal generate — Gemini providers only (DeepSeek is text-only)."""
+        gemini_provs = [p for p in self.providers
+                        if p.name == "gemini" and p.pool.keys]
+        if not gemini_provs:
+            raise NoProvidersError("no gemini provider configured for media")
+        if timeout is None:
+            timeout = config.AI_REQUEST_TIMEOUT
+        last_err = "no gemini providers"
+        for prov in gemini_provs:
+            attempts = max(1, len(prov.pool.keys))
+            for _ in range(attempts):
+                key = prov.pool.choose()
+                if not key:
+                    break
+                text, err = _gemini_call_mm(key, prov.model, prompt, system,
+                                           max_tokens, timeout, media)
+                if not err:
+                    prov.pool.report_ok(key)
+                    return text
+                prov.pool.report_dead(key)
+                last_err = f"{prov.name}: {err}"
+        raise RuntimeError(f"all gemini providers failed: {last_err}")
 
 
 _ROUTER: AIRouter | None = None

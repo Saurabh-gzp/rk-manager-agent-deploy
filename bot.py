@@ -328,6 +328,81 @@ def _handle_rule_command(msg: dict, uid: int, chat_id: int, text: str) -> bool:
     return True
 
 
+# ---------------- media (photo / voice / video) ----------------
+# Gemini model capabilities (per docs): images up to 7MB inline each
+# (png/jpeg/webp/heic); audio up to ~9.5h (ogg/mp3/wav/aac/flac);
+# video up to ~45 min with audio, 20MB inline ceiling per request.
+# Bot operating caps below stay comfortably inside those limits so replies
+# stay fast.
+
+_MEDIA_KIND_LABEL = {"photo": "[photo]", "voice": "[voice message]",
+                     "video": "[video]"}
+_MAX_MEDIA_BYTES = 15 * 1024 * 1024   # under the 20MB inline ceiling
+_MAX_VOICE_SECONDS = 600              # 10 min
+_MAX_VIDEO_SECONDS = 600              # 10 min (model allows ~45 min)
+
+
+def _media_kinds(msg: dict) -> list[str]:
+    """Cheap check: which media types are attached (no download)."""
+    kinds = []
+    if msg.get("photo"):
+        kinds.append("photo")
+    if (msg.get("voice") or {}).get("file_id"):
+        kinds.append("voice")
+    vid = msg.get("video") or msg.get("video_note") or {}
+    if vid.get("file_id"):
+        kinds.append("video")
+    return kinds
+
+
+def _download_media(msg: dict) -> tuple[list[dict], str | None]:
+    """Download attached media for the AI.
+
+    Returns (media_list, error). media items: {mime_type, data (b64), kind}.
+    error is a human message when something was attached but unusable.
+    """
+    import base64
+
+    media: list[dict] = []
+    photo = msg.get("photo") or []
+    if photo:
+        biggest = max(photo, key=lambda p: p.get("file_size") or 0)
+        data = tg_api.download_file(biggest.get("file_id"),
+                                    max_bytes=_MAX_MEDIA_BYTES)
+        if data is None:
+            return [], "Photo download nahi ho paya — dobara bhejo."
+        media.append({"mime_type": "image/jpeg",
+                      "data": base64.b64encode(data).decode("ascii"),
+                      "kind": "photo"})
+
+    voice = msg.get("voice") or {}
+    if voice.get("file_id"):
+        if (voice.get("duration") or 0) > _MAX_VOICE_SECONDS:
+            return [], (f"Voice message {_MAX_VOICE_SECONDS // 60} minute se lamba hai — "
+                        "chhota bhejo.")
+        data = tg_api.download_file(voice["file_id"],
+                                    max_bytes=_MAX_MEDIA_BYTES)
+        if data is None:
+            return [], "Voice download nahi ho paya — dobara bhejo."
+        media.append({"mime_type": voice.get("mime_type") or "audio/ogg",
+                      "data": base64.b64encode(data).decode("ascii"),
+                      "kind": "voice"})
+
+    video = msg.get("video") or msg.get("video_note") or {}
+    if video.get("file_id"):
+        if (video.get("duration") or 0) > _MAX_VIDEO_SECONDS:
+            return [], (f"Video {_MAX_VIDEO_SECONDS // 60} minute se lambi hai — "
+                        "chhoti clip bhejo.")
+        data = tg_api.download_file(video["file_id"],
+                                    max_bytes=_MAX_MEDIA_BYTES)
+        if data is None:
+            return [], "Video download nahi ho paya — dobara bhejo ya chhoti file bhejo."
+        media.append({"mime_type": video.get("mime_type") or "video/mp4",
+                      "data": base64.b64encode(data).decode("ascii"),
+                      "kind": "video"})
+    return media, None
+
+
 def _remember(chat_id: int, name: str, text: str,
               is_bot: bool = False, is_owner: bool = False) -> None:
     text = (text or "").strip()
@@ -669,13 +744,19 @@ def handle_message(msg) -> None:
         if not is_owner:
             return
         # otherwise: treat as a normal question (owner context)
-        if not text:
+        kinds = _media_kinds(msg)
+        if not text and not kinds:
+            return
+        question = text or " ".join(_MEDIA_KIND_LABEL[k] for k in kinds)
+        media, media_err = _download_media(msg) if kinds else ([], None)
+        if media_err:
+            tg_api.send_message(chat_id, f"⚠️ {media_err}")
             return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
-               "username": user.get("username"), "owner": True}
+               "username": user.get("username"), "owner": True, "media": media}
         try:
-            res = agent.answer(text, ctx)
+            res = agent.answer(question, ctx)
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
@@ -695,7 +776,9 @@ def handle_message(msg) -> None:
         knowledge.ingest_message(msg)
         # Remember for the reply gate's conversation context.
         _who = user.get("first_name") or user.get("username") or "member"
-        _remember(chat_id, _who, text, is_owner=(uid == config.OWNER_CHAT_ID))
+        _remember(chat_id, _who,
+                  text or " ".join(_MEDIA_KIND_LABEL[k] for k in _media_kinds(msg)),
+                  is_owner=(uid == config.OWNER_CHAT_ID))
 
         # Manual escalation: ONLY when a user explicitly asks for a human.
         # The bot never escalates on its own anymore.
@@ -778,6 +861,11 @@ def handle_message(msg) -> None:
             question = text[ask_match.end():].strip()
         else:
             question = text
+        # Media-only message: give the gate something to judge from context
+        # (e.g. the bot just asked for a screenshot).
+        kinds = _media_kinds(msg)
+        if not question and kinds:
+            question = " ".join(_MEDIA_KIND_LABEL[k] for k in kinds)
         # Strip bot username from the question.
         uname = _bot_username()
         if uname:
@@ -787,11 +875,17 @@ def handle_message(msg) -> None:
         if triggers.is_group_scan_request(question):
             _deliver_answer(chat_id, _group_scan_answer(chat_id))
             return
+        # Download attached media (only now — not for ignored messages).
+        media, media_err = _download_media(msg) if kinds else ([], None)
+        if media_err:
+            _deliver_answer(chat_id, {"text": f"⚠️ {media_err}"})
+            return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
                "username": user.get("username"), "group": True, "group_id": chat_id,
                "group_role": _group_role(chat_id, uid),
-               "bot_admin": _bot_rights(chat_id)}
+               "bot_admin": _bot_rights(chat_id),
+               "media": media}
         try:
             res = agent.answer(question, ctx)
         except Exception:
