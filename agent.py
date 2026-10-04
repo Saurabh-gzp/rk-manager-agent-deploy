@@ -12,6 +12,21 @@ import knowledge
 import tg_api
 
 
+# The bot's real moderation powers. Stated in the prompt so the model never
+# invents a refusal like "mere paas power nahi hai".
+_CAPABILITIES = (
+    "Your real group moderation tools — never deny having these: "
+    "/filter (auto-reply or auto-delete on a word), /filters (list them), "
+    "/stop (remove a filter), /mute, /tmute (temp mute like 30m/2h/1d), "
+    "/unmute, /delete (delete a replied message), /ban and /unban "
+    "(OWNER ONLY). Your auto-moderation also acts by itself: abuse words get "
+    "deleted (warn first, mute on repeat — never auto-ban), and filters set "
+    "by the owner trigger automatically. If someone asks about your commands "
+    "or powers, list these briefly and truthfully. Never invent a missing "
+    "ability."
+)
+
+
 SYSTEM_PROMPT = (
     "You are RK Manager — the AI agent for a Telegram gaming community "
     "(BGMI mods, loaders, APKs, tech support). "
@@ -25,17 +40,69 @@ SYSTEM_PROMPT = (
     "of it, say naturally in the user's language that you don't have that "
     "record — do not refuse with a canned line. "
     "Reply in the user's language (Hindi, Hinglish ok). Be concise, friendly "
-    "and chat-like — like a group member, not a robot."
+    "and chat-like — like a group member, not a robot. "
+    "You are also the group's MANAGER, not just a Q&A bot — think like one: "
+    "if a task needs checking something first, say you'll check, check it, "
+    "then report back. "
+    "Who-info: the sender's group role and YOUR admin rights in this group "
+    "are given in context — always respect them. If someone asks "
+    "'me kon hu / main kaun hun', answer with their actual role from context. "
+    "Before promising to delete/mute/ban, check your rights in context; if "
+    "you lack them, say clearly which admin permission you need instead of "
+    "pretending. "
+    "You may reply with MULTIPLE messages when natural (e.g. an "
+    "acknowledgement first, then details): separate messages with a line "
+    "containing only <SPLIT>. "
+    "If the user asks something you should verify first (e.g. 'new loader "
+    "konsa aaya') and the context above is not enough, do NOT guess — reply "
+    "with exactly: LOOKUP: <search query>. The system will then say "
+    "'Ruko bhai, dekhta hu', run a deeper search, and ask you again with "
+    "fresh results. Use LOOKUP only when a real check is needed, never for "
+    "chit-chat. "
+    + _CAPABILITIES
 )
 
 GENERAL_PROMPT = (
     "You are RK Manager, a concise Telegram assistant. Answer ordinary "
-    "general-knowledge questions in the user's language. Never claim to know "
-    "this group's live membership, permissions, messages, or a user's past "
-    "conversation unless that information is explicitly present in context. "
-    "If asked about a person's past messages and there is no matching context, "
-    "say you do not have that history."
+    "general-knowledge questions in the user's language. The sender's group "
+    "role and your admin rights may be given in context — you may use exactly "
+    "what is stated there, never guess beyond it. Never claim to know a "
+    "user's past conversation unless that information is explicitly present "
+    "in context. If asked about a person's past messages and there is no "
+    "matching context, say you do not have that history. "
+    + _CAPABILITIES
 )
+
+
+def _role_context(user_ctx: dict) -> str:
+    """Human-readable lines about the sender's group role and the bot's own
+    admin rights, so the model answers 'me kon hu' truthfully and never
+    promises an action it cannot perform."""
+    lines: list[str] = []
+    role = user_ctx.get("group_role")
+    if role and role != "unknown":
+        human = {"owner": "the group OWNER",
+                 "administrator": "a group ADMIN",
+                 "member": "a group MEMBER"}.get(role, role)
+        lines.append(f"- The person messaging you right now is {human}.")
+    ba = user_ctx.get("bot_admin")
+    if isinstance(ba, dict) and ba.get("status") not in (None, "unknown"):
+        status = ba.get("status")
+        if status in ("creator", "administrator"):
+            can = []
+            if ba.get("can_delete"):
+                can.append("delete messages")
+            if ba.get("can_restrict"):
+                can.append("mute/restrict and ban members")
+            rights = ", ".join(can) if can else "no special rights recorded"
+            lines.append(
+                f"- YOUR status in this group: admin ({status}). "
+                f"You CAN: {rights}.")
+        else:
+            lines.append(
+                "- YOUR status in this group: NOT admin — you cannot "
+                "delete/mute/ban anyone until an admin gives you those rights.")
+    return "\n".join(lines)
 
 def _format_context(hits: list[dict]) -> str:
     out: list[str] = []
@@ -57,6 +124,51 @@ def _has_file_in_context(hits: list[dict]) -> dict | None:
         if h.get("kind") == "post" and h.get("file_id"):
             return h
     return None
+
+
+def _maybe_deep_lookup(first_text: str | None, question: str,
+                       user_ctx: dict, system: str) -> tuple[str | None, str | None]:
+    """Honor a `LOOKUP: <query>` request from the model.
+
+    Sends an interim acknowledgement ("Ruko bhai, dekhta hu"), runs a
+    deeper knowledge search with the model's own query, then asks the
+    model again with the fresh results. Single round only — no loops.
+    Returns (final_text, interim_text_or_None).
+    """
+    t = (first_text or "").strip()
+    if t[:7].upper() != "LOOKUP:":
+        return first_text, None
+    query = t[7:].strip()[:200]
+    chat_id = user_ctx.get("chat_id")
+    if not query or not chat_id:
+        return first_text, None
+    interim = "Ruko bhai, dekhta hu 🔍"
+    try:
+        tg_api.send_message(chat_id, interim)
+    except Exception:
+        pass
+    try:
+        hits = knowledge.search(query, limit=10,
+                                user_id=user_ctx.get("user_id"))
+        ctx2 = _format_context(hits)
+    except Exception:
+        ctx2 = ""
+    prompt = (
+        f"User ka original sawal: {question}\n"
+        f"Tumne deeper search manga tha: '{query}'\n"
+        f"Deeper search results:\n{ctx2 if ctx2 else '(kuch khaas nahi mila)'}\n\n"
+        "Ab final jawab do — user ki language me, concise, apne shabdon me. "
+        "Agar results me jawab nahi hai to apne general knowledge se do. "
+        "'Check kiya' jaisi robotic line mat likho, seedha jawab do."
+    )
+    try:
+        final = ai_engine.get_router().generate(prompt, system=system)
+    except Exception:
+        final = ""
+    if not (final or "").strip():
+        final = ("Dekha maine, lekin is par pakki info nahi mili. "
+                 "Thoda detail batao, phir batata hu.")
+    return final, interim
 
 
 def answer(question: str, user_ctx: dict) -> dict:
@@ -86,14 +198,18 @@ def answer(question: str, user_ctx: dict) -> dict:
         user_id=user_ctx.get("user_id"),
     )
     ctx_block = _format_context(hits)
+    who_block = _role_context(user_ctx)
     if hits and ctx_block:
         prompt = (
             f"Context (learned from channel + group):\n{ctx_block}\n\n"
-            f"User question ({user_ctx.get('first_name') or user_ctx.get('username') or 'user'}): {question}\n"
+            + (f"Who-info:\n{who_block}\n\n" if who_block else "")
+            + f"User question ({user_ctx.get('first_name') or user_ctx.get('username') or 'user'}): {question}\n"
             "Answer:"
         )
         try:
             text = ai_engine.get_router().generate(prompt, system=SYSTEM_PROMPT)
+            text, interim = _maybe_deep_lookup(text, question, user_ctx,
+                                               SYSTEM_PROMPT)
         except ai_engine.NoProvidersError:
             return {
                 "text": "AI keys configure nahi hain. Owner se bolo set karein.",
@@ -116,6 +232,8 @@ def answer(question: str, user_ctx: dict) -> dict:
             "sources": len(hits),
             "needs_escalation": False,
         }
+        if interim:
+            result["interim"] = interim
         # If we also have a related file and the answer mentions it, attach.
         file_hit = _has_file_in_context(hits)
         if file_hit and any(w in text.lower() for w in ("file", "download", "bhej", "link", "send", "attached", "document")):
@@ -130,16 +248,21 @@ def answer(question: str, user_ctx: dict) -> dict:
     # prompt already forbids fabricating personal history. Never escalate:
     # the bot always replies itself.
     try:
-        text = ai_engine.get_router().generate(
-            f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:",
-            system=GENERAL_PROMPT,
+        who_block = _role_context(user_ctx)
+        qprompt = (
+            (f"Who-info:\n{who_block}\n\n" if who_block else "")
+            + f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:"
         )
+        text = ai_engine.get_router().generate(qprompt, system=GENERAL_PROMPT)
+        text, interim = _maybe_deep_lookup(text, question, user_ctx,
+                                           GENERAL_PROMPT)
         return {
             "text": text,
             "grounded": False,
             "sources": 0,
             "general": True,
             "needs_escalation": False,
+            "interim": interim,
         }
     except ai_engine.NoProvidersError:
         return {

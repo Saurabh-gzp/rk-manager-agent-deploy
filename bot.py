@@ -156,6 +156,62 @@ def _remember(chat_id: int, name: str, text: str,
              "owner": is_owner})
 
 
+# Live Telegram role / rights lookups (5-min cache — roles change rarely,
+# and group messages must not each cost 2 API calls).
+_ROLE_CACHE: dict[tuple[int, int], tuple[str, float]] = {}
+_BOTRIGHT_CACHE: dict[int, tuple[dict, float]] = {}
+_ROLE_TTL = 300
+
+
+def _group_role(chat_id: int, user_id: int) -> str:
+    """Live role of a user in the group: owner/administrator/member/unknown."""
+    if user_id == config.OWNER_CHAT_ID:
+        return "owner"
+    key = (chat_id, user_id)
+    now = time.time()
+    hit = _ROLE_CACHE.get(key)
+    if hit and now - hit[1] < _ROLE_TTL:
+        return hit[0]
+    role = "unknown"
+    try:
+        m = tg_api.get_chat_member(chat_id, user_id) or {}
+        status = m.get("status") or ""
+        if status == "creator":
+            role = "owner"
+        elif status == "administrator":
+            role = "administrator"
+        elif status:
+            role = "member"
+    except Exception:
+        pass
+    _ROLE_CACHE[key] = (role, now)
+    return role
+
+
+def _bot_rights(chat_id: int) -> dict:
+    """RK Manager's own admin rights in the group (cached)."""
+    now = time.time()
+    hit = _BOTRIGHT_CACHE.get(chat_id)
+    if hit and now - hit[1] < _ROLE_TTL:
+        return hit[0]
+    info = {"status": "unknown", "can_delete": False, "can_restrict": False}
+    try:
+        bot_id = _bot_id()
+        m = tg_api.get_chat_member(chat_id, bot_id) if bot_id else {}
+        status = (m or {}).get("status") or ""
+        info["status"] = status or "unknown"
+        if status == "creator":
+            info["can_delete"] = True
+            info["can_restrict"] = True
+        elif status == "administrator":
+            info["can_delete"] = bool(m.get("can_delete_messages"))
+            info["can_restrict"] = bool(m.get("can_restrict_members"))
+    except Exception:
+        pass
+    _BOTRIGHT_CACHE[chat_id] = (info, now)
+    return info
+
+
 _GATE_SYSTEM = (
     "You are the reply-decision module for RK Manager, an AI assistant in a "
     "Telegram gaming group. Answer with exactly one word: YES or NO."
@@ -477,6 +533,12 @@ def handle_message(msg) -> None:
             )
             return
 
+        # Rose-style mod tools (owner/admin): /filter /mute /tmute /unmute
+        # /ban /unban /delete. Handled before the reply gate so commands
+        # are never swallowed as chatter.
+        if moderation.handle_mod_command(msg, uid, chat_id):
+            return
+
         # The bot reads EVERY message, but replies only when spoken to or
         # needed — using its own judgment (LLM gate), not just /ask.
         # Explicitly directed at the bot: always answer.
@@ -526,7 +588,9 @@ def handle_message(msg) -> None:
             return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
-               "username": user.get("username"), "group": True, "group_id": chat_id}
+               "username": user.get("username"), "group": True, "group_id": chat_id,
+               "group_role": _group_role(chat_id, uid),
+               "bot_admin": _bot_rights(chat_id)}
         try:
             res = agent.answer(question, ctx)
         except Exception:
@@ -541,16 +605,31 @@ def _deliver_answer(chat_id: int, res: dict) -> None:
 
     The bot ALWAYS replies itself and never escalates automatically.
     Human escalation is manual only, via the /admin command.
+    The answer may contain several messages separated by a line with
+    only <SPLIT> — each is sent (and remembered) as its own message,
+    like a human manager would.
     """
+    def _send_and_remember(part: str) -> None:
+        tg_api.send_message(chat_id, part)
+        # Remember the bot's own message for the reply gate's context.
+        if chat_id and chat_id < 0:
+            _remember(chat_id, "RK Manager", part, is_bot=True)
+
+    # Interim acknowledgement from a deep-lookup round ("Ruko bhai...").
+    interim = (res.get("interim") or "").strip()
+    if interim:
+        _send_and_remember(interim)
+        time.sleep(0.6)
+
     text = res.get("text") or ""
-    if text:
-        tg_api.send_message(chat_id, text)
-    else:
-        text = "🤔 Samajh nahi aaya — thoda detail me pucho."
-        tg_api.send_message(chat_id, text)
-    # Remember the bot's own message for the reply gate's context.
-    if chat_id and chat_id < 0:
-        _remember(chat_id, "RK Manager", text, is_bot=True)
+    parts = [p.strip() for p in text.split("<SPLIT>") if p.strip()]
+    if parts:
+        for i, part in enumerate(parts):
+            _send_and_remember(part)
+            if i < len(parts) - 1:
+                time.sleep(0.6)
+    elif not interim:
+        _send_and_remember("🤔 Samajh nahi aaya — thoda detail me pucho.")
 
     # If there's a file offer, send it
     fo = res.get("file_offer")

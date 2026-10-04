@@ -93,7 +93,8 @@ def api(method: str, params: dict | None = None, files: dict | None = None, time
 # ---------------------- Convenience wrappers ----------------------
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None,
-                 disable_web_page_preview=None) -> dict:
+                 disable_web_page_preview=None,
+                 reply_to_message_id=None) -> dict:
     text = str(text or "")
     chunks = [text[i:i + MAX_TEXT] for i in range(0, max(len(text), 1), MAX_TEXT)]
     first = None
@@ -104,6 +105,7 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None,
             "parse_mode": parse_mode,
             "disable_web_page_preview": disable_web_page_preview,
             "reply_markup": reply_markup if idx == 0 else None,
+            "reply_to_message_id": reply_to_message_id if idx == 0 else None,
         }
         r = api("sendMessage", p)
         if idx == 0:
@@ -182,6 +184,23 @@ def restrict_chat_member(chat_id, user_id, permissions, until_date=None) -> dict
         "user_id": user_id,
         "permissions": permissions,
         "until_date": until_date,
+    })
+
+
+def ban_chat_member(chat_id, user_id, until_date=None) -> dict:
+    """Ban a user; without until_date the ban is permanent."""
+    return api("banChatMember", {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "until_date": until_date,
+    })
+
+
+def unban_chat_member(chat_id, user_id, only_if_banned=True) -> dict:
+    return api("unbanChatMember", {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "only_if_banned": only_if_banned,
     })
 
 
