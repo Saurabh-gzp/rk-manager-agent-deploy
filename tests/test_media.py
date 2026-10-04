@@ -99,6 +99,26 @@ class GenerateMmTests(unittest.TestCase):
         with self.assertRaises(ai_engine.NoProvidersError):
             router.generate_mm("sawal", [])
 
+    def test_mm_wire_format_is_camelcase(self):
+        bodies = []
+
+        def fake_post(key, model, body, timeout):
+            bodies.append(body)
+            return "ok!", ""
+
+        router = self._router_with(["k1"])
+        with patch.object(ai_engine, "_gemini_post", side_effect=fake_post):
+            router.generate_mm("sawal", [{"mime_type": "image/jpeg",
+                                          "data": "AAA", "kind": "photo"}])
+        raw = str(bodies[0])
+        self.assertNotIn("inline_data", raw)
+        self.assertNotIn("mime_type", raw)
+        parts = bodies[0]["contents"][0]["parts"]
+        inline = [p for p in parts if "inlineData" in p]
+        self.assertEqual(len(inline), 1)
+        self.assertEqual(inline[0]["inlineData"]["mimeType"], "image/jpeg")
+        self.assertEqual(inline[0]["inlineData"]["data"], "AAA")
+
 
 class GenerateAnswerTests(unittest.TestCase):
     def test_with_media_calls_mm(self):

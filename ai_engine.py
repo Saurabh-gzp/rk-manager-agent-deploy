@@ -153,7 +153,8 @@ def _gemini_call_mm(key: str, model: str, prompt: str, system: str | None,
     for m in media or []:
         mt, data = m.get("mime_type"), m.get("data")
         if mt and data:
-            parts.append({"inline_data": {"mime_type": mt, "data": data}})
+            # REST wire format is camelCase (inlineData/mimeType).
+            parts.append({"inlineData": {"mimeType": mt, "data": data}})
     body = {
         "contents": [{"parts": parts}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7},
