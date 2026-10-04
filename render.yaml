@@ -27,7 +27,7 @@ services:
       - key: ADMIN_CHAT_ID
         sync: false
       - key: DEFAULT_MODEL
-        value: gemini-2.5-flash-lite
+        value: gemini-3.5-flash-lite
       - key: PYTHON_VERSION
         value: 3.12.0
 
@@ -56,6 +56,6 @@ services:
   #     - key: WEBHOOK_URL
   #       sync: false
   #     - key: DEFAULT_MODEL
-  #       value: gemini-2.5-flash-lite
+  #       value: gemini-3.5-flash-lite
   #     - key: PYTHON_VERSION
   #       value: 3.12.0

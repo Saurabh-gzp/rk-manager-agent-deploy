@@ -54,8 +54,8 @@ WEBHOOK_SECRET = (
 # --- Behaviour ---
 DB_NAME = os.environ.get("DB_NAME", "rk_agent").strip() or "rk_agent"
 DEFAULT_MODEL = (
-    os.environ.get("DEFAULT_MODEL", "gemini-2.5-flash-lite").strip()
-    or "gemini-2.5-flash-lite"
+    os.environ.get("DEFAULT_MODEL", "gemini-3.5-flash-lite").strip()
+    or "gemini-3.5-flash-lite"
 )
 POLL_TIMEOUT = _int("POLL_TIMEOUT", 50)
 PRUNE_EVERY_HOURS = _int("PRUNE_EVERY_HOURS", 12)

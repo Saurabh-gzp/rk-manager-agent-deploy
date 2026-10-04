@@ -14,6 +14,7 @@ Strategy:
 from __future__ import annotations
 import json
 import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -69,7 +70,7 @@ class _KeyPool:
 
 def mask_key(k: str) -> str:
     if not k:
-        return "—"
+        return "-"
     s = str(k)
     if len(s) <= 8:
         return s[:4] + "..."
@@ -90,7 +91,7 @@ def _post_json(url: str, body: dict, headers: dict, timeout: int) -> tuple[int, 
             return resp.status, json.loads(resp.read().decode("utf-8")), ""
     except urllib.error.HTTPError as e:
         try:
-            return e.code, json.loads(e.read().decode("utf-8")), ""
+            return e.code or 0, json.loads(e.read().decode("utf-8")), ""
         except Exception:
             return e.code or 0, {}, str(e)
     except urllib.error.URLError as e:
@@ -109,8 +110,6 @@ def _extract_gemini_text(result: dict) -> str:
                 parts.append(t)
     if parts:
         return "".join(parts)
-    # safety block / no candidates
-    pf = result.get("promptFeedback") or {}
     return ""
 
 
@@ -215,13 +214,10 @@ class AIRouter:
             raise NoProvidersError("no AI providers configured")
         if timeout is None:
             timeout = config.AI_REQUEST_TIMEOUT
-        # Build a randomized attempt order: shuffle providers, then for each
-        # provider try up to N keys (where N = # of its keys) before moving on.
         providers = list(self.providers)
         random.shuffle(providers)
         last_err = "no providers"
         for prov in providers:
-            # Within a provider, do up to len(keys) attempts.
             attempts = max(1, len(prov.pool.keys))
             for _ in range(attempts):
                 key = prov.pool.choose()
@@ -250,7 +246,12 @@ def get_router() -> AIRouter:
 
 
 def list_gemini_models() -> list[str]:
-    """Return Gemini model short names (uses first healthy key)."""
+    """Return cleaned Gemini model short names (uses first healthy key).
+
+    Filters out specialized variants (image / tts / preview / transcribe /
+    nano / omni / lyria / deep-research) so the owner panel only shows
+    the actual chat models.
+    """
     pool = _KeyPool("gemini", config.GEMINI_KEYS, 0) if config.GEMINI_KEYS else None
     if not pool or not pool.keys:
         return []
@@ -264,18 +265,41 @@ def list_gemini_models() -> list[str]:
     except Exception:
         return []
     names: list[str] = []
+    skip_suffixes = (
+        "-image", "-tts", "-preview", "-transcribe", "-nano",
+        "-omni", "-lyria", "-deep-research", "-customtools",
+    )
     for m in data.get("models") or []:
         name = str(m.get("name", ""))
         if name.startswith("models/"):
             name = name[len("models/"):]
-        if "gemini" in name.lower():
-            names.append(name)
-    return sorted(set(names))
+        nl = name.lower()
+        if "gemini" not in nl:
+            continue
+        methods = m.get("supportedGenerationMethods") or []
+        if methods and "generateContent" not in methods:
+            continue
+        if any(nl.endswith(s) for s in skip_suffixes):
+            continue
+        names.append(name)
+
+    def _sort_key(n: str) -> tuple:
+        nl = n.lower()
+        m = re.search(r"(\d+\.\d+)", n)
+        ver = float(m.group(1)) if m else 0.0
+        is_lite = 0 if "flash-lite" in nl else 1
+        is_flash = 0 if "flash" in nl else 1
+        is_pro = 0 if "pro" in nl else 1
+        return (-ver, is_lite, is_flash, is_pro, n)
+
+    return sorted(set(names), key=_sort_key)[:25]
 
 
 def pick_default_model(models: list[str]) -> str:
     if not models:
         return config.DEFAULT_MODEL
+    if "gemini-3.5-flash-lite" in models:
+        return "gemini-3.5-flash-lite"
     if "gemini-2.5-flash-lite" in models:
         return "gemini-2.5-flash-lite"
     for m in models:
