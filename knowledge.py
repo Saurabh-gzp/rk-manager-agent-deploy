@@ -62,7 +62,11 @@ def ingest_message(msg: dict) -> None:
             "first_name": frm.get("first_name"),
             "text": text,
             "date": msg.get("date"),
-            "importance": _importance(text, None, bool(msg.get("forward_from_chat")), "?" in text),
+            "importance": _importance(
+                text, None,
+                bool(msg.get("forward_from_chat") or msg.get("forward_origin")),
+                "?" in text,
+            ),
             "ingested_at": time.time(),
         }
         if doc["chat_id"] is None or not text:
@@ -85,13 +89,25 @@ def ingest_channel_post(post: dict) -> None:
             "file_id": file_id,
             "file_type": file_type,
             "date": post.get("date"),
-            "forwarded": bool(post.get("forward_from_chat")),
-            "importance": _importance(text, file_id, bool(post.get("forward_from_chat")), "?" in text),
+            "forwarded": bool(post.get("forward_from_chat") or post.get("forward_origin")),
+            "importance": _importance(
+                text, file_id,
+                bool(post.get("forward_from_chat") or post.get("forward_origin")),
+                "?" in text,
+            ),
             "ingested_at": time.time(),
         }
         if doc["channel_id"] is None or (not text and not file_id):
             return
-        get_db()["channel_posts"].insert_one(doc)
+        posts = get_db()["channel_posts"]
+        existing = posts.find_one({
+            "channel_id": doc["channel_id"],
+            "message_id": doc["message_id"],
+        })
+        if existing:
+            posts.update_one({"_id": existing["_id"]}, {"$set": doc})
+        else:
+            posts.insert_one(doc)
     except Exception as exc:  # noqa: BLE001
         print(f"[knowledge] ingest_channel_post failed: {exc!r}", file=__import__("sys").stderr)
 
@@ -102,28 +118,45 @@ def _tokenize(query: str) -> list[str]:
     return [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2][:6]
 
 
-def search(query: str, limit: int = 10) -> list[dict]:
-    """Case-insensitive search across messages, posts, qa. Returns ranked hits."""
+def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict]:
+    """Search the asking user's own history plus shared channel posts.
+
+    Group messages and Q&A stay scoped to the current Telegram user so one
+    member's personal history is not surfaced in another member's answer.
+    """
     tokens = _tokenize(query)
     if not tokens:
         return []
     db = get_db()
     hits: list[dict] = []
-    seen: set = set()
+    by_key: dict[tuple, dict] = {}
 
     def add(doc: dict, kind: str, text: str, extra: dict | None = None):
         key = (kind, doc.get("_id"))
-        if key in seen:
+        if key in by_key:
+            by_key[key]["match_score"] += 1
             return
-        seen.add(key)
-        row = {"kind": kind, "text": text, "date": doc.get("date") or 0}
+        row = {
+            "kind": kind,
+            "text": text,
+            "date": doc.get("date") or 0,
+            "match_score": 1,
+        }
         if extra:
             row.update(extra)
+        by_key[key] = row
         hits.append(row)
 
     for tok in tokens:
         rgx = {"$regex": re.escape(tok), "$options": "i"}
-        for d in db["messages"].find({"text": rgx}):
+        message_filter = {"text": rgx}
+        qa_question_filter = {"question": rgx}
+        qa_answer_filter = {"answer": rgx}
+        if user_id is not None:
+            message_filter["user_id"] = user_id
+            qa_question_filter["user_id"] = user_id
+            qa_answer_filter["user_id"] = user_id
+        for d in db["messages"].find(message_filter):
             add(d, "message", str(d.get("text", "")), {"chat_id": d.get("chat_id")})
         for d in db["channel_posts"].find({"text": rgx}):
             add(d, "post", str(d.get("text", "") or d.get("caption") or ""), {
@@ -137,12 +170,15 @@ def search(query: str, limit: int = 10) -> list[dict]:
                 "caption": d.get("caption"), "channel_id": d.get("channel_id"),
                 "message_id": d.get("message_id"),
             })
-        for d in db["qa"].find({"question": rgx}):
+        for d in db["qa"].find(qa_question_filter):
             add(d, "qa", f"Q: {d.get('question','')}\nA: {d.get('answer','')}", {"chat_id": d.get("chat_id")})
-        for d in db["qa"].find({"answer": rgx}):
+        for d in db["qa"].find(qa_answer_filter):
             add(d, "qa", f"Q: {d.get('question','')}\nA: {d.get('answer','')}", {"chat_id": d.get("chat_id")})
 
-    hits.sort(key=lambda r: (r.get("date") or 0), reverse=True)
+    hits.sort(
+        key=lambda r: (r.get("match_score") or 0, r.get("date") or 0),
+        reverse=True,
+    )
     return hits[:limit]
 
 
@@ -180,13 +216,41 @@ def prune_once() -> dict:
     """Run one cleanup cycle. Returns counts dict."""
     db = get_db()
     now = time.time()
-    counts = {"messages": 0, "posts": 0, "qa_old": 0, "escalations_resolved": 0}
+    counts = {
+        "messages": 0,
+        "posts": 0,
+        "qa_old": 0,
+        "escalations_resolved": 0,
+        "inactive_users": 0,
+    }
 
-    # messages
+    # Keep each member's complete history while they remain active. Clear that
+    # member's history only after a long period with no new messages.
+    last_activity: dict[int, float] = {}
     for d in db["messages"].find():
-        if _is_stale_message(d, now):
-            db["messages"].delete_many({"_id": d["_id"]})
-            counts["messages"] += 1
+        user_id = d.get("user_id")
+        if user_id is None:
+            if _is_stale_message(d, now):
+                db["messages"].delete_many({"_id": d["_id"]})
+                counts["messages"] += 1
+            continue
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            continue
+        last_activity[user_id] = max(
+            last_activity.get(user_id, 0),
+            float(d.get("date") or d.get("ingested_at") or 0),
+        )
+    idle_limit = config.USER_MEMORY_IDLE_DAYS * 86400
+    for user_id, last_ts in last_activity.items():
+        if now - last_ts <= idle_limit:
+            continue
+        counts["messages"] += db["messages"].count_documents({"user_id": user_id})
+        db["messages"].delete_many({"user_id": user_id})
+        counts["qa_old"] += db["qa"].count_documents({"user_id": user_id})
+        db["qa"].delete_many({"user_id": user_id})
+        counts["inactive_users"] += 1
     # posts
     for d in db["channel_posts"].find():
         if _is_stale_post(d, now):

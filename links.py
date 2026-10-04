@@ -39,10 +39,16 @@ def set_channel(chat_id: int, title: str | None = None) -> None:
 
 
 def clear_group() -> None:
+    group_id = get_group_id()
+    if group_id:
+        get_db()["links"].delete_many({"group_id": group_id})
     save_state("group_id", 0)
 
 
 def clear_channel() -> None:
+    channel_id = get_channel_id()
+    if channel_id:
+        get_db()["links"].delete_many({"channel_id": channel_id})
     save_state("channel_id", 0)
 
 

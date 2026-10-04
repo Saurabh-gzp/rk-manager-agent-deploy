@@ -20,6 +20,21 @@ SYSTEM_PROMPT = (
     "Be concise and friendly. If the context has a file, mention what it is."
 )
 
+GENERAL_PROMPT = (
+    "You are RK Manager, a concise Telegram assistant. Answer ordinary "
+    "general-knowledge questions in the user's language. Never claim to know "
+    "this group's live membership, permissions, messages, or a user's past "
+    "conversation unless that information is explicitly present in context. "
+    "If asked about a person's past messages and there is no matching context, "
+    "say you do not have that history."
+)
+
+_PERSONAL_HISTORY_MARKERS = (
+    "meri problem", "my problem", "maine kya", "maine bola", "maine bataya",
+    "pichli baar", "pehle kya", "last time", "previous chat", "remember me",
+    "do you remember", "what did i say", "what was my issue",
+)
+
 
 def _format_context(hits: list[dict]) -> str:
     out: list[str] = []
@@ -64,7 +79,11 @@ def answer(question: str, user_ctx: dict) -> dict:
                 }
 
     # 2. Knowledge-grounded answer
-    hits = knowledge.search(question, limit=10)
+    hits = knowledge.search(
+        question,
+        limit=10,
+        user_id=user_ctx.get("user_id"),
+    )
     ctx_block = _format_context(hits)
     if hits and ctx_block:
         prompt = (
@@ -88,11 +107,12 @@ def answer(question: str, user_ctx: dict) -> dict:
                 "sources": len(hits),
                 "error": str(exc)[:200],
             }
-        grounded = "I do not have this information" not in text
+        grounded = "i do not have this information" not in text.casefold()
         result = {
             "text": text,
             "grounded": grounded,
             "sources": len(hits),
+            "needs_escalation": not grounded,
         }
         # If we also have a related file and the answer mentions it, attach.
         file_hit = _has_file_in_context(hits)
@@ -104,21 +124,34 @@ def answer(question: str, user_ctx: dict) -> dict:
             }
         return result
 
-    # 3. No learned content at all (fresh bot / first install)
+    # 3. No matching memory. Avoid fabricating personal history; answer only
+    # ordinary general questions without claiming group-specific knowledge.
+    if any(marker in question.casefold() for marker in _PERSONAL_HISTORY_MARKERS):
+        return {
+            "text": "Mujhe is user ki purani baat ka relevant record nahi mila. Main admin ko poochne ke liye bhej raha hoon.",
+            "grounded": False,
+            "sources": 0,
+            "needs_escalation": True,
+            "error": "no_personal_context",
+        }
     try:
         text = ai_engine.get_router().generate(
             f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:",
-            system=(
-                "You are RK Manager, a helpful Telegram AI agent. Be concise, "
-                "friendly. Reply in the user's language."
-            ),
+            system=GENERAL_PROMPT,
         )
-        return {"text": text, "grounded": True, "sources": 0, "general": True}
+        return {
+            "text": text,
+            "grounded": False,
+            "sources": 0,
+            "general": True,
+            "needs_escalation": False,
+        }
     except ai_engine.NoProvidersError:
         return {
             "text": "AI keys configure nahi hain. Owner se bolo set karein.",
             "grounded": False,
             "sources": 0,
+            "needs_escalation": True,
             "error": "no_ai_providers",
         }
     except Exception as exc:  # noqa: BLE001

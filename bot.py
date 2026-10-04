@@ -7,12 +7,14 @@ Dispatch:
   - message:
       private (owner ONLY): /start -> owner_panel.handle_start
                             /forget -> owner_panel.handle_forget_command
+                            /mod_* and /mute -> owner_panel.handle_owner_command
                             forget-mode text -> owner_panel.handle_forget_mode_text
                             DM reply to escalation -> escalation.handle_admin_message
                             other text -> treated as a question, answered (no escalation)
-      private (anyone else): silently ignored. Bot only talks to its owner in DMs.
+      private admin: escalation replies only.
+      private (anyone else): silently ignored.
       group/supergroup:       ALWAYS ingest
-                              /ask or @mention -> agent.answer; if not grounded, escalate
+                              natural questions/requests, /ask, or @mention -> answer
 
 Run mode: webhook if WEBHOOK_URL set, else long-polling.
 """
@@ -36,6 +38,8 @@ import agent  # noqa: E402
 import escalation  # noqa: E402
 import owner_panel  # noqa: E402
 import links  # noqa: E402
+import moderation  # noqa: E402
+import triggers  # noqa: E402
 
 
 def log(*args):
@@ -77,6 +81,56 @@ def _mentions_bot(text: str, entities: list) -> bool:
             if chunk == uname.lower():
                 return True
     return False
+
+
+def _mentions_other_user(text: str, entities: list) -> bool:
+    """Avoid replying to messages explicitly directed at another member."""
+    bot_name = _bot_username().lower()
+    for ent in entities or []:
+        if ent.get("type") == "mention":
+            start, length = ent.get("offset", 0), ent.get("length", 0)
+            mentioned = (text or "")[start:start + length].lstrip("@").lower()
+            if mentioned and mentioned != bot_name:
+                return True
+        elif ent.get("type") == "text_mention":
+            target_id = (ent.get("user") or {}).get("id")
+            if target_id and target_id != _bot_id():
+                return True
+    return False
+
+
+def _is_ask_command(text: str) -> re.Match | None:
+    return re.match(r"^/ask(?:@\w+)?(?:\s+|$)", (text or "").strip(), re.IGNORECASE)
+
+
+def _group_scan_answer(chat_id: int) -> dict:
+    """Report live Telegram facts; never guess whether the bot is an admin."""
+    bot_id = _bot_id()
+    member = tg_api.get_chat_member(chat_id, bot_id) if bot_id else {}
+    count = tg_api.get_chat_member_count(chat_id)
+    if not member:
+        return {
+            "text": "Telegram se group status verify nahi ho paya. Bot ko group mein admin/member access aur required permissions check karein.",
+            "grounded": False,
+            "needs_escalation": False,
+            "sources": 0,
+        }
+    status = member.get("status") or "unknown"
+    is_admin = status in ("administrator", "creator")
+    rights = member.get("can_delete_messages", False), member.get("can_restrict_members", False)
+    return {
+        "text": (
+            f"🔎 Group check (live Telegram status)\n"
+            f"Members: {count if count else 'count unavailable'}\n"
+            f"Bot status: {status}\n"
+            f"Admin: {'yes' if is_admin else 'no'}\n"
+            f"Delete messages: {'yes' if rights[0] else 'no'}\n"
+            f"Restrict members: {'yes' if rights[1] else 'no'}"
+        ),
+        "grounded": True,
+        "needs_escalation": False,
+        "sources": 1,
+    }
 
 
 def _is_private_owner(uid: int) -> bool:
@@ -134,12 +188,13 @@ def handle_my_chat_member(update) -> None:
     if old_status not in ("left", "kicked", None):
         return
 
-    # Owner-less deployment: refuse everything
+    # Owner-less deployment: refuse everything without posting to channels.
     if not config.OWNER_CHAT_ID:
-        try:
-            tg_api.send_message(chat_id, "Bot is not configured yet. Owner se contact karo.")
-        except Exception:
-            pass
+        if chat_type in ("group", "supergroup"):
+            try:
+                tg_api.send_message(chat_id, "Bot is not configured yet. Owner se contact karo.")
+            except Exception:
+                pass
         try:
             tg_api.leave_chat(chat_id)
         except Exception:
@@ -156,10 +211,11 @@ def handle_my_chat_member(update) -> None:
             "@rkgamersbgmi\n\n"
             "Wahan se owner se baat karke apna setup karwa sakte ho."
         )
-        try:
-            tg_api.send_message(chat_id, join_msg)
-        except Exception:
-            pass
+        if chat_type in ("group", "supergroup"):
+            try:
+                tg_api.send_message(chat_id, join_msg)
+            except Exception:
+                pass
         try:
             tg_api.leave_chat(chat_id)
         except Exception:
@@ -170,7 +226,7 @@ def handle_my_chat_member(update) -> None:
             tg_api.send_message(
                 config.OWNER_CHAT_ID,
                 f"⚠️ Kisi ne ({adder_id}) bot ko apne {chat_type} me add kiya: "
-                f"{title}. Maine reject kar diya aur leave kar diya.",
+                f"{title}. Maine bina channel par post kiye reject karke leave kar diya.",
             )
         except Exception:
             pass
@@ -190,7 +246,7 @@ def handle_my_chat_member(update) -> None:
                 chat_id,
                 "👋 Namaste! Main RK Manager hoon.\n\n"
                 "✅ Is group ko apna primary group bana liya.\n"
-                "Ab har chat se seekhunga aur members ke sawalon ka jawab dunga.",
+                "Ab messages se seekhunga; sirf sawal ya request aane par jawab dunga.",
             )
         except Exception:
             pass
@@ -210,25 +266,14 @@ def handle_my_chat_member(update) -> None:
                 tg_api.leave_chat(prev)
             except Exception:
                 pass
-        me = tg_api.get_me()
-        bot_id = me.get("id")
-        admins = tg_api.get_chat_administrators(chat_id) or []
-        is_admin = any((a.get("user") or {}).get("id") == bot_id for a in admins)
-        if is_admin:
-            try:
-                tg_api.send_message(chat_id, "✅ Channel se seekhna shuru! Posts auto-index hongi.")
-            except Exception:
-                pass
-        else:
-            try:
-                tg_api.send_message(chat_id, "⚠️ Mujhe admin banao (Post messages) taaki channel posts padh sakun.")
-            except Exception:
-                pass
+        is_admin = status in ("administrator", "creator")
         try:
             tg_api.send_message(
                 config.OWNER_CHAT_ID,
                 f"✅ Channel auto-set!\n\nTitle: {title}\nID: `{chat_id}`\n"
-                f"Admin: {'yes' if is_admin else 'no — please add me as admin'}",
+                f"Read access: {'yes' if is_admin else 'not yet'}\n\n"
+                "Channel mein main koi message/post nahi bhejunga. Naye posts padhne ke liye "
+                "bot ko admin rakhna hoga; Post Messages permission OFF rakh sakte ho.",
             )
         except Exception:
             pass
@@ -269,28 +314,37 @@ def handle_message(msg) -> None:
     # Private DM is OWNER-ONLY. Any other user (including separate admin)
     # sending a DM gets no reply at all — silently ignored.
     if chat_type == "private":
-        if uid != config.OWNER_CHAT_ID:
+        is_owner = _is_private_owner(uid)
+        is_admin = bool(config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID)
+        if not is_owner and not is_admin:
             # non-owner DM: do nothing
             return
-        # /start
-        if text == "/start" or text.startswith("/start "):
-            owner_panel.handle_start(msg)
-            return
+        if is_owner:
+            if owner_panel.handle_owner_command(msg):
+                return
+            # /start
+            if text == "/start" or text.startswith("/start "):
+                owner_panel.handle_start(msg)
+                return
         # /forget
-        if text.startswith("/forget"):
+        if is_owner and text.startswith("/forget"):
             if owner_panel.handle_forget_command(msg):
                 return
         # forget-mode text (after panel button)
-        if owner_panel.handle_forget_mode_text(msg):
+        if is_owner and owner_panel.handle_forget_mode_text(msg):
             return
         # group-fwd mode (after "Set by Forward" panel button)
-        if owner_panel.handle_group_fwd(msg):
+        if is_owner and owner_panel.handle_group_fwd(msg):
             return
         # channel-fwd mode
-        if owner_panel.handle_channel_fwd(msg):
+        if is_owner and owner_panel.handle_channel_fwd(msg):
             return
         # admin/owner reply to escalation
+        if not is_owner and text.startswith("/"):
+            return
         if escalation.handle_admin_message(msg):
+            return
+        if not is_owner:
             return
         # otherwise: treat as a normal question (owner context)
         if not text:
@@ -311,23 +365,49 @@ def handle_message(msg) -> None:
         # Only respond in the OWNER's managed group. Other groups = ignored.
         if not links.is_managed_group(chat_id):
             return
+        # Moderation runs before ingestion so removed abusive messages are not
+        # added to long-term memory.
+        if moderation.handle_group_message(msg):
+            return
         # Learn from every non-command non-bot message
         knowledge.ingest_message(msg)
 
-        # Only respond to explicit asks or mentions
-        is_ask = text.startswith("/ask ")
+        # Respond to bot mentions, /ask, direct questions, or clear requests;
+        # do not interject in a reply addressed to another group member.
+        ask_match = _is_ask_command(text)
+        is_ask = ask_match is not None
         is_mention = _mentions_bot(text, msg.get("entities") or msg.get("caption_entities") or [])
-        if not (is_ask or is_mention):
+        reply_to = msg.get("reply_to_message") or {}
+        reply_user = (reply_to.get("from") or {}).get("id")
+        replied_to_bot = bool(reply_user and reply_user == _bot_id())
+        entities = msg.get("entities") or msg.get("caption_entities") or []
+        if not (is_ask or is_mention or replied_to_bot or triggers.is_question_or_request(text)):
             return
+        if not is_mention and not is_ask:
+            if reply_to and not replied_to_bot:
+                return
+            if _mentions_other_user(text, entities):
+                return
 
-        question = text[len("/ask "):].strip() if is_ask else text
-        # strip bot username from the question
+        if is_ask:
+            question = text[ask_match.end():].strip()
+        else:
+            question = text
+        # Strip bot username from the question.
         uname = _bot_username()
         if uname:
             question = re.sub(rf"@{re.escape(uname)}\b", "", question, flags=re.IGNORECASE).strip()
         if not question:
             return
-
+        if triggers.is_group_scan_request(question):
+            _deliver_answer(
+                chat_id,
+                _group_scan_answer(chat_id),
+                escalate=False,
+                user_id=uid,
+                question=question,
+            )
+            return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
                "username": user.get("username"), "group": True, "group_id": chat_id}
@@ -336,11 +416,19 @@ def handle_message(msg) -> None:
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
-        _deliver_answer(chat_id, res, escalate=True)
+        _deliver_answer(
+            chat_id, res, escalate=True, user_id=uid, question=question
+        )
         return
 
 
-def _deliver_answer(chat_id: int, res: dict, escalate: bool) -> None:
+def _deliver_answer(
+    chat_id: int,
+    res: dict,
+    escalate: bool,
+    user_id: int | None = None,
+    question: str = "",
+) -> None:
     """Send the answer / file to the user; if not grounded, escalate."""
     text = res.get("text") or ""
     if text:
@@ -355,10 +443,12 @@ def _deliver_answer(chat_id: int, res: dict, escalate: bool) -> None:
         except Exception:
             pass
 
-    if escalate and not res.get("grounded"):
+    needs_escalation = res.get("needs_escalation", not res.get("grounded"))
+    if escalate and needs_escalation:
         eid = escalation.open_escalation(
-            user_id=0, user_chat_id=chat_id,
-            question=(res.get("text") or "(no text)")[:400],
+            user_id=user_id or 0,
+            user_chat_id=chat_id,
+            question=(question or "(no question)")[:400],
             source="group" if chat_id < 0 else "private",
         )
         if not text:
@@ -420,6 +510,8 @@ def _dispatch_update(u) -> None:
         handle_my_chat_member(u)
     elif "channel_post" in u:
         handle_channel_post(u["channel_post"])
+    elif "edited_channel_post" in u:
+        handle_channel_post(u["edited_channel_post"])
     elif "callback_query" in u:
         handle_callback_query(u["callback_query"])
     elif "message" in u:
@@ -428,18 +520,38 @@ def _dispatch_update(u) -> None:
 
 def run_webhook() -> None:
     secret = config.WEBHOOK_SECRET
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", secret or ""):
+        raise RuntimeError(
+            "WEBHOOK_SECRET must be set to a random 1-256 character Telegram secret token."
+        )
     hook_path = "/" + secret
     full_url = config.WEBHOOK_URL + hook_path
     try:
-        r = tg_api.set_webhook(full_url)
+        r = tg_api.set_webhook(full_url, secret_token=secret)
         log("setWebhook ->", r.get("ok"), r.get("description", ""))
     except Exception:
         log("setWebhook failed:", traceback.format_exc())
 
     class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/", "/healthz"):
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):
             if self.path.rstrip("/") != hook_path.rstrip("/"):
                 self.send_response(404)
+                self.end_headers()
+                return
+            if self.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+                self.send_response(403)
                 self.end_headers()
                 return
             try:
@@ -458,7 +570,7 @@ def run_webhook() -> None:
         def log_message(self, *args):
             pass
 
-    log(f"webhook mode on port {config.PORT} path {hook_path}")
+    log(f"webhook mode on port {config.PORT} (secret path configured)")
     HTTPServer(("0.0.0.0", config.PORT), H).serve_forever()
 
 
@@ -466,7 +578,10 @@ def main() -> None:
     log("starting RK Manager Agent…")
     log(f"owner={config.OWNER_CHAT_ID} admin={config.ADMIN_CHAT_ID or config.OWNER_CHAT_ID}")
     log(f"gemini_keys={len(config.GEMINI_KEYS)} deepseek={'yes' if config.DEEPSEEK_KEY else 'no'}")
-    log(f"mongo={'yes' if config.MONGODB_URI else 'no (in-memory)'}")
+    log(
+        "storage=MongoDB (persistent)" if db.is_persistent()
+        else "storage=in-memory (volatile; restart loses stored data)"
+    )
     if config.WEBHOOK_URL:
         run_webhook()
     else:

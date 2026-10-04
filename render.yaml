@@ -28,6 +28,8 @@ services:
         sync: false
       - key: DEFAULT_MODEL
         value: gemini-3.5-flash-lite
+      - key: USER_MEMORY_IDLE_DAYS
+        value: "180"
       - key: PYTHON_VERSION
         value: 3.12.0
 
@@ -55,7 +57,11 @@ services:
   #       sync: false
   #     - key: WEBHOOK_URL
   #       sync: false
+  #     - key: WEBHOOK_SECRET
+  #       sync: false
   #     - key: DEFAULT_MODEL
   #       value: gemini-3.5-flash-lite
+  #     - key: USER_MEMORY_IDLE_DAYS
+  #       value: "180"
   #     - key: PYTHON_VERSION
   #       value: 3.12.0

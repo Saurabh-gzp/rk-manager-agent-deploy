@@ -102,6 +102,14 @@ def handle_callback(cb) -> bool:
         if from_uid not in (_admin_id(), _owner_id()):
             _answer(cb_id, "Sirf admin/owner.", show_alert=True)
             return True
+        if action == "oreply" and from_uid != _owner_id():
+            _answer(cb_id, "Sirf owner.", show_alert=True)
+            return True
+        esc = _get(eid)
+        expected_status = "pending_owner" if action == "oreply" else "pending_admin"
+        if not esc or esc.get("status") != expected_status:
+            _answer(cb_id, "Ye escalation ab open nahi hai.", show_alert=True)
+            return True
         save_state(f"awaiting_reply:{from_uid}", eid)
         _edit(chat_id, message_id, "✍️ Apna jawab DM me likho, main user tak pahunchata hu.",
               reply_markup={"inline_keyboard": [
@@ -116,6 +124,10 @@ def handle_callback(cb) -> bool:
         owner_id = _owner_id()
         if admin_id and from_uid != admin_id:
             _answer(cb_id, "Sirf admin.", show_alert=True)
+            return True
+        esc = _get(eid)
+        if not esc or esc.get("status") != "pending_admin":
+            _answer(cb_id, "Ye escalation ab admin ke liye open nahi hai.", show_alert=True)
             return True
         if not owner_id or owner_id == admin_id:
             _answer(cb_id, "Owner configured nahi hai.")
@@ -143,11 +155,19 @@ def handle_callback(cb) -> bool:
         return True
 
     if action == "cancel":
+        if from_uid not in (_admin_id(), _owner_id()):
+            _answer(cb_id, "Sirf admin/owner.", show_alert=True)
+            return True
+        esc = _get(eid)
+        if not esc or esc.get("status") in ("resolved", "cancelled"):
+            _answer(cb_id, "Ye escalation ab open nahi hai.", show_alert=True)
+            return True
+        if get_state(f"awaiting_reply:{from_uid}") == eid:
+            save_state(f"awaiting_reply:{from_uid}", None)
         get_db()["escalations"].update_one(
             _eid_filter(eid),
             {"$set": {"status": "cancelled"}},
         )
-        save_state(f"awaiting_reply:{from_uid}", None)
         _answer(cb_id, "Cancelled")
         _edit(chat_id, message_id, "❌ Cancelled.")
         return True
@@ -166,6 +186,9 @@ def handle_admin_message(msg) -> bool:
         return False
     esc = _get(eid)
     text = (msg.get("text") or msg.get("caption") or "").strip()
+    if not esc or esc.get("status") in ("resolved", "cancelled") or not text:
+        save_state(f"awaiting_reply:{from_uid}", None)
+        return False
     user_chat_id = (esc or {}).get("user_chat_id")
     if user_chat_id and text:
         prefix = "💬 Admin ka jawab" if from_uid == _admin_id() else "💬 Owner ka jawab"
@@ -199,5 +222,5 @@ def pending_for(who: str) -> list[dict]:
     """who = 'admin' or 'owner'. Return pending escalations for that level."""
     db = get_db()
     if who == "admin":
-        return db["escalations"].find({"status": "pending_admin"}).__iter__().__next__() if False else list(db["escalations"].find({"status": "pending_admin"}))
+        return list(db["escalations"].find({"status": "pending_admin"}))
     return list(db["escalations"].find({"status": "pending_owner"}))

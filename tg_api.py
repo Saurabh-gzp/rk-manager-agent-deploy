@@ -157,12 +157,32 @@ def get_chat_administrators(chat_id) -> list[dict]:
     return r.get("result", []) if isinstance(r, dict) and r.get("ok") else []
 
 
+def get_chat_member(chat_id, user_id) -> dict:
+    r = api("getChatMember", {"chat_id": chat_id, "user_id": user_id})
+    return r.get("result", {}) if isinstance(r, dict) and r.get("ok") else {}
+
+
 def get_chat_member_count(chat_id) -> int:
     r = api("getChatMemberCount", {"chat_id": chat_id})
     try:
         return int(r.get("result", 0)) if isinstance(r, dict) and r.get("ok") else 0
     except Exception:
         return 0
+
+
+def delete_message(chat_id, message_id) -> dict:
+    if not message_id:
+        return {"ok": False, "description": "message_id is required"}
+    return api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+
+
+def restrict_chat_member(chat_id, user_id, permissions, until_date=None) -> dict:
+    return api("restrictChatMember", {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "permissions": permissions,
+        "until_date": until_date,
+    })
 
 
 def send_chat_action(chat_id, action="typing") -> dict:
@@ -212,8 +232,15 @@ def leave_chat(chat_id) -> dict:
     return api("leaveChat", {"chat_id": chat_id})
 
 
-def set_webhook(url) -> dict:
-    return api("setWebhook", {"url": url, "allowed_updates": ["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"]})
+def set_webhook(url, secret_token=None) -> dict:
+    return api("setWebhook", {
+        "url": url,
+        "secret_token": secret_token,
+        "allowed_updates": [
+            "message", "callback_query", "my_chat_member",
+            "channel_post", "edited_channel_post",
+        ],
+    })
 
 
 def delete_webhook(drop_pending=False) -> dict:

@@ -23,6 +23,7 @@ import config
 import escalation
 import knowledge
 import links
+import moderation
 import tg_api
 
 
@@ -98,6 +99,91 @@ def handle_forget_command(msg) -> bool:
     n = knowledge.forget_query(q)
     _send(chat_id, f"🗑 {n} rows bhula diye.")
     return True
+
+
+def handle_owner_command(msg) -> bool:
+    """Handle moderation and runtime commands from the owner's private DM only."""
+    uid = (msg.get("from") or {}).get("id")
+    chat_id = (msg.get("chat") or {}).get("id")
+    text = (msg.get("text") or "").strip()
+    if not text.startswith("/"):
+        return False
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
+    known = {
+        "/mod_add", "/mod_remove", "/mod_list", "/mod_on", "/mod_off",
+        "/mute", "/status",
+    }
+    if command not in known:
+        return False
+    if not _is_owner(uid):
+        _send(chat_id, "Ye command sirf owner chala sakta hai.")
+        return True
+
+    argument = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+    if command == "/mod_list":
+        terms = moderation.get_terms()
+        joined = ", ".join(terms) if terms else "koi moderation term set nahi hai"
+        _send(chat_id, f"Moderation: {'ON' if moderation.is_enabled() else 'OFF'}\nTerms: {joined}")
+        return True
+    if command == "/mod_add":
+        term = argument[:64].strip()
+        if not term:
+            _send(chat_id, "Usage: /mod_add <word or phrase>")
+            return True
+        terms = moderation.get_terms()
+        normalized = term.casefold()
+        if normalized not in terms:
+            terms.append(term)
+            moderation.set_terms(terms)
+        _send(chat_id, f"✅ Moderation term add kiya: {term}")
+        return True
+    if command == "/mod_remove":
+        term = argument[:64].strip().casefold()
+        if not term:
+            _send(chat_id, "Usage: /mod_remove <word or phrase>")
+            return True
+        moderation.set_terms([item for item in moderation.get_terms() if item != term])
+        _send(chat_id, f"✅ Moderation term remove kiya: {term}")
+        return True
+    if command in ("/mod_on", "/mod_off"):
+        enabled = command == "/mod_on"
+        moderation.set_enabled(enabled)
+        _send(chat_id, f"✅ Automatic moderation {'ON' if enabled else 'OFF'} hai. Ban action kabhi nahi hota.")
+        return True
+    if command == "/mute":
+        parts = argument.split()
+        if len(parts) not in (1, 2):
+            _send(chat_id, "Usage: /mute <telegram_user_id> [minutes, 1-1440]")
+            return True
+        try:
+            target_id = int(parts[0])
+            minutes = int(parts[1]) if len(parts) == 2 else 10
+        except ValueError:
+            _send(chat_id, "User ID aur duration numeric hone chahiye.")
+            return True
+        group_id = links.get_group_id()
+        if not group_id:
+            _send(chat_id, "Managed group set nahi hai.")
+            return True
+        result = moderation.manual_mute(group_id, target_id, minutes)
+        if result.get("ok"):
+            _send(chat_id, f"⏱ User {target_id} ko {minutes} minute mute kiya. Ban nahi kiya.")
+        else:
+            _send(chat_id, f"Mute apply nahi hua: {result.get('description', 'Telegram API error')}")
+        return True
+    if command == "/status":
+        from db import is_persistent
+        store = "MongoDB" if is_persistent() else "temporary in-memory (restart par data lost ho sakta hai)"
+        _send(
+            chat_id,
+            f"Runtime status\nStorage: {store}\n"
+            f"Group ID: {links.get_group_id() or 'not set'}\n"
+            f"Channel ID: {links.get_channel_id() or 'not set'}\n"
+            f"Moderation: {'ON' if moderation.is_enabled() else 'OFF'} "
+            f"({len(moderation.get_terms())} terms)",
+        )
+        return True
+    return False
 
 
 def _back():
@@ -440,6 +526,7 @@ def handle_callback(cb) -> bool:
             "📊 Stats\n\n"
             f"Group:  {gid or '—'}\n"
             f"Channel: {cid or '—'}\n"
+            f"Storage: {'MongoDB' if __import__('db').is_persistent() else 'RAM fallback (volatile)'}\n"
             f"Model:  {model}\n"
             f"AI providers: {router.provider_count()} ({router.key_count()} keys)\n\n"
             f"Messages: {s['messages']}\n"
@@ -458,10 +545,14 @@ def handle_callback(cb) -> bool:
         text = (
             "❓ Help\n\n"
             "• Owner DM me /start → control panel\n"
-            "• Group me: /ask <sawal> ya @botname mention karo\n"
-            "• Channel: bot admin banao, posts auto-learn\n"
+            "• Group me natural sawal/request likho; /ask ya mention bhi kaam karta hai\n"
+            "• Plain greetings aur kisi member ko reply par bot interrupt nahi karega\n"
+            "• Channel: bot ko admin rakho, Post Messages OFF; bot sirf read karega\n"
             "• File maango: 'apk bhej' / 'send file' likho\n"
             "• Escalation: admin pehle, owner last resort\n"
+            "• Owner DM: /mod_add <word>, /mod_remove <word>, /mod_list, /mod_on, /mod_off\n"
+            "• Owner DM: /mute <telegram_user_id> [minutes, max 1440]; koi ban nahi\n"
+            "• Owner DM: /status — storage aur managed group/channel check\n"
             "• Cleanup: panel > 🧠 Memory Cleanup\n"
             "• Limitation: purane messages bot nahi padh sakta (add hone ke din se seekhega)\n"
         )
@@ -521,6 +612,28 @@ def _reconcile_now() -> str:
         return f"error: {exc!r}"
 
 
+def _forwarded_chat(msg) -> dict:
+    """Support both legacy forward_from_chat and modern forward_origin."""
+    legacy = msg.get("forward_from_chat") or {}
+    if legacy.get("id"):
+        return legacy
+    origin = msg.get("forward_origin") or {}
+    if origin.get("type") in ("channel", "chat"):
+        return origin.get("chat") or {}
+    return {}
+
+
+def _bot_is_member(chat_id: int, require_admin: bool) -> bool:
+    bot_id = (tg_api.get_me() or {}).get("id")
+    if not bot_id:
+        return False
+    member = tg_api.get_chat_member(chat_id, bot_id)
+    status = member.get("status")
+    if require_admin:
+        return status in ("administrator", "creator")
+    return status in ("member", "administrator", "creator")
+
+
 def get_state(k: str, default=None):
     from db import get_state as _g
     return _g(k, default)
@@ -567,13 +680,16 @@ def handle_group_fwd(msg) -> bool:
         save_state(f"{uid}:group_fwd_mode", False)
         _send(chat_id, "Cancelled.")
         return True
-    origin = msg.get("forward_from_chat") or {}
+    origin = _forwarded_chat(msg)
     origin_id = origin.get("id")
     origin_type = origin.get("type")
     if not origin_id or origin_type not in ("group", "supergroup"):
         _send(chat_id,
               "Ye message group se forwarded nahi hai.\n"
               "Target group se forward karo (kisi member ka msg ya apna msg).")
+        return True
+    if not _bot_is_member(int(origin_id), require_admin=False):
+        _send(chat_id, "Pehle bot ko target group mein add karo, phir us group ka message forward karke set karo.")
         return True
     title = origin.get("title") or origin.get("username") or "Group"
     prev = links.get_group_id()
@@ -602,13 +718,16 @@ def handle_channel_fwd(msg) -> bool:
         save_state(f"{uid}:channel_fwd_mode", False)
         _send(chat_id, "Cancelled.")
         return True
-    origin = msg.get("forward_from_chat") or {}
+    origin = _forwarded_chat(msg)
     origin_id = origin.get("id")
     origin_type = origin.get("type")
     if not origin_id or origin_type != "channel":
         _send(chat_id,
               "Ye message channel se forwarded nahi hai.\n"
               "Target channel se forward karo.")
+        return True
+    if not _bot_is_member(int(origin_id), require_admin=True):
+        _send(chat_id, "Channel read karne ke liye pehle bot ko channel admin banao (Post Messages permission OFF rakhna), phir forward karke set karo.")
         return True
     title = origin.get("title") or origin.get("username") or "Channel"
     prev = links.get_channel_id()
@@ -621,5 +740,5 @@ def handle_channel_fwd(msg) -> bool:
     save_state(f"{uid}:channel_fwd_mode", False)
     _send(chat_id,
           f"Channel set!\n\nTitle: {title}\nID: {origin_id}\n\n"
-          f"Ab main is channel ke posts seekhunga.")
+          "Main channel se read karunga, koi post/message nahi bhejunga.")
     return True

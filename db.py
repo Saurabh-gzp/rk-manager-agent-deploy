@@ -44,6 +44,13 @@ def _match_doc(doc: dict, flt: Optional[dict]) -> bool:
     if not flt:
         return True
     for k, c in flt.items():
+        if isinstance(c, dict):
+            if "$exists" in c and (k in doc) != bool(c["$exists"]):
+                return False
+            if "$ne" in c and doc.get(k) == c["$ne"]:
+                return False
+            if "$in" in c and doc.get(k) not in c["$in"]:
+                return False
         if not _match_value(doc.get(k), c):
             return False
     return True
@@ -154,9 +161,15 @@ def get_db() -> Any:
     return _DB
 
 
+def is_persistent() -> bool:
+    """Whether the initialized store is MongoDB rather than volatile RAM."""
+    return not isinstance(get_db(), IMDB)
+
+
 def _ensure_indexes(db) -> None:
     try:
         db["messages"].create_index("chat_id")
+        db["messages"].create_index("user_id")
         db["messages"].create_index("date")
         db["messages"].create_index("importance")
         db["channel_posts"].create_index("channel_id")

@@ -4,6 +4,7 @@ All secrets come from env vars. Same code runs locally and on Render.
 """
 from __future__ import annotations
 import os
+import secrets
 
 
 def _int(name: str, default: int) -> int:
@@ -47,9 +48,7 @@ ADMIN_CHAT_ID = _int("ADMIN_CHAT_ID", 0)  # 0 -> falls back to owner
 # --- Run mode ---
 PORT = _int("PORT", 10000)
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip().rstrip("/")
-WEBHOOK_SECRET = (
-    os.environ.get("WEBHOOK_SECRET", "rk-secret-2026").strip() or "rk-secret-2026"
-)
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip() or secrets.token_urlsafe(32)
 
 # --- Behaviour ---
 DB_NAME = os.environ.get("DB_NAME", "rk_agent").strip() or "rk_agent"
@@ -66,3 +65,4 @@ POST_TTL_DAYS = _int("POST_TTL_DAYS", 120)
 FILE_POST_TTL_DAYS = _int("FILE_POST_TTL_DAYS", 240)
 KEY_BACKOFF_SECONDS = _int("KEY_BACKOFF_SECONDS", 600)
 AI_REQUEST_TIMEOUT = _int("AI_REQUEST_TIMEOUT", 45)
+USER_MEMORY_IDLE_DAYS = max(1, _int("USER_MEMORY_IDLE_DAYS", 180))
