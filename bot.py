@@ -5,12 +5,12 @@ Dispatch:
   - channel_post     -> knowledge.ingest_channel_post
   - callback_query   -> owner_panel.handle_callback, escalation.handle_callback
   - message:
-      private (owner/admin): /start -> owner_panel.handle_start
-                              /forget -> owner_panel.handle_forget_command
-                              forget-mode text -> owner_panel.handle_forget_mode_text
-                              DM reply to escalation -> escalation.handle_admin_message
-                              other -> treated as a question, answered (and may escalate)
-      private (other user):  question -> agent.answer; if not grounded, escalate
+      private (owner ONLY): /start -> owner_panel.handle_start
+                            /forget -> owner_panel.handle_forget_command
+                            forget-mode text -> owner_panel.handle_forget_mode_text
+                            DM reply to escalation -> escalation.handle_admin_message
+                            other text -> treated as a question, answered (no escalation)
+      private (anyone else): silently ignored. Bot only talks to its owner in DMs.
       group/supergroup:       ALWAYS ingest
                               /ask or @mention -> agent.answer; if not grounded, escalate
 
@@ -168,48 +168,38 @@ def handle_message(msg) -> None:
     text = (msg.get("text") or msg.get("caption") or "").strip()
 
     # ---------------- private chat ----------------
+    # Private DM is OWNER-ONLY. Any other user (including separate admin)
+    # sending a DM gets no reply at all — silently ignored.
     if chat_type == "private":
-        # Owner commands
-        if _is_private_owner(uid) or _is_private_admin(uid):
-            # /start
-            if text == "/start" or text.startswith("/start "):
-                owner_panel.handle_start(msg)
-                return
-            # /forget
-            if text.startswith("/forget"):
-                if owner_panel.handle_forget_command(msg):
-                    return
-            # forget-mode text (after panel button)
-            if owner_panel.handle_forget_mode_text(msg):
-                return
-            # admin reply to escalation
-            if escalation.handle_admin_message(msg):
-                return
-            # otherwise: treat as a normal question
-            if not text:
-                return
-            tg_api.send_chat_action(chat_id, "typing")
-            ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
-                   "username": user.get("username"), "owner": True}
-            try:
-                res = agent.answer(text, ctx)
-            except Exception:
-                log("agent.answer failed:", traceback.format_exc())
-                res = {"text": None, "grounded": False, "error": "internal"}
-            _deliver_answer(chat_id, res, escalate=False)
+        if uid != config.OWNER_CHAT_ID:
+            # non-owner DM: do nothing
             return
-        # Regular user DM
+        # /start
+        if text == "/start" or text.startswith("/start "):
+            owner_panel.handle_start(msg)
+            return
+        # /forget
+        if text.startswith("/forget"):
+            if owner_panel.handle_forget_command(msg):
+                return
+        # forget-mode text (after panel button)
+        if owner_panel.handle_forget_mode_text(msg):
+            return
+        # admin/owner reply to escalation
+        if escalation.handle_admin_message(msg):
+            return
+        # otherwise: treat as a normal question (owner context)
         if not text:
             return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
-               "username": user.get("username")}
+               "username": user.get("username"), "owner": True}
         try:
             res = agent.answer(text, ctx)
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
-        _deliver_answer(chat_id, res, escalate=True)
+        _deliver_answer(chat_id, res, escalate=False)
         return
 
     # ---------------- group chat ----------------
