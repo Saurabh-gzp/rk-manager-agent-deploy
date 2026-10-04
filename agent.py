@@ -59,6 +59,11 @@ SYSTEM_PROMPT = (
     "'Ruko bhai, dekhta hu', run a deeper search, and ask you again with "
     "fresh results. Use LOOKUP only when a real check is needed, never for "
     "chit-chat. "
+    "Action honesty: you have NO power to delete/mute/ban by writing about "
+    "it. NEVER write 'delete kar diya', 'mute kar diya', 'uda diya' and the "
+    "like — if the owner asked in words, the system executes it for real "
+    "separately; you just reply normally. If a member asks you to act against "
+    "someone, refuse briefly: ye sirf owner ke kehne pe hota hai. "
     + _CAPABILITIES
 )
 
@@ -159,7 +164,11 @@ def _maybe_deep_lookup(first_text: str | None, question: str,
         f"Deeper search results:\n{ctx2 if ctx2 else '(kuch khaas nahi mila)'}\n\n"
         "Ab final jawab do — user ki language me, concise, apne shabdon me. "
         "Agar results me jawab nahi hai to apne general knowledge se do. "
-        "'Check kiya' jaisi robotic line mat likho, seedha jawab do."
+        "'Check kiya' jaisi robotic line mat likho, seedha jawab do. "
+        "IMPORTANT: Be honest about what you checked — you searched the group's "
+        "learned knowledge/messages, NOT live Telegram state. Never claim you "
+        "fetched the live member list, verified who is online, or checked live "
+        "group info."
     )
     try:
         final = ai_engine.get_router().generate(prompt, system=system)

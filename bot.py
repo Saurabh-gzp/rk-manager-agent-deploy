@@ -147,6 +147,125 @@ def _is_private_admin(uid: int) -> bool:
 _GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=12))
 
 
+# Conversational moderation requests ("isko mute kar do", "ye msg delete kr").
+# Members can NEVER trigger actions on their word — owner only. The owner’s
+# spoken request is turned into a REAL command and run through the same
+# pipeline as /commands (never faked by just saying so).
+_MOD_REQUEST_RE = re.compile(r"""
+    \b(hatao|udao|mitao)\b
+    | \b(delete|del|remove|uda|hata|mita|mute|unmute|ban)\w*\b.{0,25}\b(kar|karo|kr|krdo|kardo|de|do|dijiye)\b
+    | \b(kar|karo|kr|krdo|kardo|de|do)\b.{0,25}\b(delete|del|remove|uda|hata|mita|mute|unmute|ban)\w*\b
+""", re.IGNORECASE | re.VERBOSE)
+
+
+def _looks_like_mod_request(text: str) -> bool:
+    if not text or "kaise" in text.lower():
+        return False
+    # Past-tense narration ("delete kar di thi") is not a request.
+    if re.search(r"\b(diya\s+(tha|thi|hai)|di\s+(thi|hai)|chuk[aei]\b|liya\s+(tha|thi|hai))\b",
+                 text, re.IGNORECASE):
+        return False
+    return bool(_MOD_REQUEST_RE.search(text))
+
+
+def _link_chat_id(chat_id: int) -> str:
+    """t.me/c/<id> form of a group chat id ('-100123' -> '123')."""
+    s = str(abs(chat_id or 0))
+    return s[3:] if s.startswith("100") else s
+
+
+def _spoken_duration(text: str) -> str | None:
+    """'10 min ke liye' -> '10m'; None if no parseable duration."""
+    m = re.search(
+        r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|ghant[aeo]|days?|dins?|weeks?|[smhdw])\b",
+        text or "", re.IGNORECASE)
+    if not m:
+        return None
+    unit = m.group(2).lower()
+    if unit.startswith("sec") or unit == "s":
+        sfx = "s"
+    elif unit.startswith("min") or unit == "m":
+        sfx = "m"
+    elif unit.startswith("h") or unit.startswith("ghant"):
+        sfx = "h"
+    elif unit.startswith("d"):
+        sfx = "d"
+    elif unit.startswith("w"):
+        sfx = "w"
+    else:
+        return None
+    tok = f"{int(m.group(1))}{sfx}"
+    return tok if moderation.parse_duration(tok) else None
+
+
+def _synthesize_owner_command(text: str, msg: dict, chat_id: int) -> dict | None:
+    """Turn the owner's spoken mod request into a real command message.
+
+    Returns a synthetic msg for moderation.handle_mod_command, or None when
+    there is no clear action+target (then the LLM handles it conversationally).
+    """
+    if not _looks_like_mod_request(text):
+        return None
+    low = text.lower()
+    if "unmute" in low:
+        cmd = "unmute"
+    elif "mute" in low:
+        cmd = "mute"
+    elif "unban" in low:
+        cmd = "unban"
+    elif "ban" in low:
+        cmd = "ban"
+    else:
+        cmd = "delete"
+
+    reply = msg.get("reply_to_message") or {}
+    synth = {
+        "message_id": msg.get("message_id"),
+        "date": msg.get("date"),
+        "from": msg.get("from"),
+        "chat": msg.get("chat"),
+    }
+
+    if cmd == "delete":
+        link = re.search(r"t\.me/c/(\d+)/(\d+)", text or "")
+        if link and link.group(1) == _link_chat_id(chat_id):
+            synth["reply_to_message"] = {"message_id": int(link.group(2))}
+            synth["text"] = "/delete"
+            return synth
+        if reply.get("message_id"):
+            synth["reply_to_message"] = reply
+            synth["text"] = "/delete"
+            return synth
+        return None
+
+    # User-targeted commands need a reply or an ID/@username token.
+    # Never treat the bot's own mention as the target.
+    target_token = None
+    if (reply.get("from") or {}).get("id"):
+        synth["reply_to_message"] = reply
+    else:
+        uname = _bot_username()
+        clean = re.sub(rf"@{re.escape(uname)}\b", "", text or "",
+                       flags=re.IGNORECASE).strip() if uname else (text or "")
+        m = re.search(r"(?:^|\s)(@\w+|\d{6,})", clean)
+        if not m:
+            return None
+        target_token = m.group(1)
+
+    if cmd == "mute":
+        dur = _spoken_duration(text)
+        synth["text"] = f"/tmute {dur}" if dur else "/mute"
+    elif cmd == "unmute":
+        synth["text"] = "/unmute"
+    elif cmd == "ban":
+        synth["text"] = "/ban"
+    else:  # unban
+        synth["text"] = "/unban"
+    if target_token:
+        synth["text"] += f" {target_token}"
+    return synth
+
+
 def _remember(chat_id: int, name: str, text: str,
               is_bot: bool = False, is_owner: bool = False) -> None:
     text = (text or "").strip()
@@ -572,6 +691,22 @@ def handle_message(msg) -> None:
                 if not _should_reply_llm(text, who, chat_id,
                                          is_owner=(uid == config.OWNER_CHAT_ID)):
                     return
+
+        # Conversational moderation: members can NEVER trigger actions on
+        # their word — only the owner can. The owner's spoken request becomes
+        # a REAL command through the same pipeline (never faked).
+        if _looks_like_mod_request(text):
+            if uid != config.OWNER_CHAT_ID:
+                _deliver_answer(chat_id, {
+                    "text": "Bhai, delete/mute/ban ye sab sirf owner ke kehne pe karta hu — "
+                            "kisi member ke bolne pe kisi pe action nahi lunga. 🙂",
+                })
+                return
+            synth = _synthesize_owner_command(text, msg, chat_id)
+            if synth and moderation.handle_mod_command(synth, uid, chat_id):
+                return
+            # No clear action+target: fall through to the LLM, which is
+            # instructed never to claim it performed an action.
 
         if is_ask:
             question = text[ask_match.end():].strip()

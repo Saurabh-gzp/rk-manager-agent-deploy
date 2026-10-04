@@ -129,7 +129,7 @@ def handle_group_message(msg: dict) -> bool:
         delete_failed = not delete_result.get("ok")
         name = (user.get("first_name") or user.get("username") or "Member").strip()
         if count == 1:
-            notice = f"⚠️ {name}, gaali wala message remove kiya. Repeat par 10-minute mute hoga; ban nahi."
+            notice = f"⚠️ {name}, gaali wala message uda diya. Pehli aur aakhri warning — Repeat kiya to seedha 10-minute mute; ban nahi karunga."
         else:
             mute_result = _mute(chat_id, user_id, MUTE_MINUTES)
             if mute_result.get("ok"):
