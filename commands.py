@@ -35,7 +35,7 @@ BOT_COMMANDS_ADMINS = [
     {"command": "purge", "description": "Bulk delete (reply + count)"},
     {"command": "pin", "description": "Replied message pin karo"},
     {"command": "unpin", "description": "Pinned message unpin karo"},
-    {"command": "filter", "description": "Word filter set karo"},
+    {"command": "filter", "description": "Rose filter: word par content mile"},
     {"command": "filters", "description": "Filters list dekho"},
     {"command": "modlog", "description": "Mod actions history"},
 ]
@@ -71,7 +71,7 @@ HELP_TEXT = (
     "• /delete — replied msg delete\n"
     "• /purge — spam bulk-clean (reply + count)\n"
     "• /pin / /unpin — messages pin/unpin\n"
-    "• /filter &lt;word&gt; [reply] — auto filter\n"
+    "• /filter &lt;word&gt; — Rose filter: reply karke save, word par content mile\n"
     "• /modlog — action history\n\n"
     "👑 <b>Owner only:</b>\n"
     "• /kick /ban /unban\n"

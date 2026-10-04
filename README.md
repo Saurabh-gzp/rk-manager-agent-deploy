@@ -47,8 +47,8 @@ chats, replies from learned content, and acts like a real group manager.
 | `/delete` | Replied message delete |
 | `/purge [n]` | Reply se lekar command tak bulk delete (max 100) |
 | `/pin /unpin [all]` | Message pin/unpin |
-| `/filter <word> [reply]` | Word filter (auto-reply ya auto-delete) |
-| `/filters / /stop / /stopall` | Filter manage |
+| `/filter <word>` | **Rose-style content filter** — kisi bhi message pe REPLY karke `/filter <word>`: file/video/photo/text **as-is** save hota hai; jab bhi koi `<word>` bolega, bot usi content ko REPLY me bhejta hai (delete kabhi nahi). Ya `/filter <word> <text>` — text reply |
+| `/filters / /stop / /stopall` | Filter list / remove / clear (`!filter`, `!stop` bhi chalta hai) |
 | `/modlog` | Recent mod actions |
 | `/kick` | Member bahar (owner only; link se wapas aa sakta) |
 | `/ban / /unban` | Ban/unban (owner only) |

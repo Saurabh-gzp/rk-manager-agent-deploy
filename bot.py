@@ -153,7 +153,9 @@ def _is_private_admin(uid: int) -> bool:
 
 # Recent conversation per chat (member + bot messages), so the reply gate
 # can see follow-ups to the bot's own messages. In-memory only.
-_GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=12))
+# maxlen=20: the ANSWER prompts also read this log (grounding for
+# past-event questions — the model sees what actually happened).
+_GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
 
 
 # Conversational moderation requests ("isko mute kar do", "ye msg delete kr").
@@ -506,6 +508,30 @@ def _remember(chat_id: int, name: str, text: str,
         _GROUP_CONTEXT[chat_id].append(
             {"name": name, "text": text[:300], "is_bot": is_bot,
              "owner": is_owner})
+
+
+def _remember_qa(uid: int, chat_id: int, question: str, answer: str | None,
+                 date=None) -> None:
+    """Save the bot's REAL answer with the question (its own track record).
+
+    Future answers search this record, so claims like 'maine kya kaha /
+    bheja tha' stay grounded in what was actually said — the bot can
+    never again invent a past answer or file send. Never raises.
+    """
+    try:
+        q = (question or "").strip()
+        a = (answer or "").strip()
+        if not q or not a or len(q) < 3:
+            return
+        db.get_db()["qa"].insert_one({
+            "user_id": uid,
+            "chat_id": chat_id,
+            "question": q[:500],
+            "answer": a[:2000],
+            "date": date or int(time.time()),
+        })
+    except Exception:
+        pass
 
 
 # Live Telegram role / rights lookups (5-min cache — roles change rarely,
@@ -1004,16 +1030,23 @@ def handle_message(msg) -> None:
                             reply_to=msg.get("message_id"))
             return
         tg_api.send_chat_action(chat_id, "typing")
+        # Grounding: the model gets the verbatim recent log (incl. its own
+        # replies) so it never hallucinates past events or file sends.
+        _recent = list(_GROUP_CONTEXT.get(chat_id, []))[:-1][-14:]
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
                "username": user.get("username"), "group": True, "group_id": chat_id,
                "group_role": _group_role(chat_id, uid),
                "bot_admin": _bot_rights(chat_id),
-               "media": media}
+               "media": media, "recent_log": _recent}
         try:
             res = agent.answer(question, ctx)
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
+        # Long-term memory of what the bot ACTUALLY answered — grounding
+        # for future 'kya tumne bola/bheja tha' questions (no false claims).
+        _remember_qa(uid, chat_id, question, res.get("text"),
+                     msg.get("date"))
         _deliver_answer(chat_id, res, reply_to=msg.get("message_id"))
         return
 

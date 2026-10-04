@@ -1,7 +1,10 @@
 """Owner-controlled group moderation with Rose-style mod tools.
 
-Auto-moderation (profanity + filters) deletes/warns/mutes but intentionally
+Auto-moderation (profanity blocklist) deletes/warns/mutes but intentionally
 never bans. Bans happen only via an explicit owner /ban command.
+
+Custom FILTERS are Rose-style content filters now (see filters.py): they
+DELIVER saved content when the keyword is used — they never delete.
 """
 from __future__ import annotations
 
@@ -12,6 +15,17 @@ import unicodedata
 import config
 from db import get_db, get_state, save_state
 import tg_api
+import filters
+from filters import (  # re-exported: tests patch these on `moderation`
+    get_filters,
+    add_filter,
+    add_text_filter,
+    remove_filter,
+    clear_filters,
+    matches_filter,
+    deliver_filter,
+    remember_media,
+)
 
 
 DEFAULT_TERMS = [
@@ -229,16 +243,26 @@ def _strike(namespace: str, chat_id: int, user_id: int) -> int:
 
 
 def handle_group_message(msg: dict) -> bool:
-    """Delete a configured profanity match; warn once, then temporary mute.
+    """Group message gate: abuse/promo moderation + Rose-style filters.
 
-    This intentionally never bans. It only operates when called for the
-    configured managed group.
+    - Profanity blocklist + external-promo links: delete + warn +
+      temp-mute on repeat (owner/admins/bots exempt, never bans).
+    - Rose-style content filters: when ANYONE (owner, admin, member) uses
+      a saved keyword, the saved content is DELIVERED as-is as a reply —
+      the triggering message is NEVER deleted. Exactly like @MissRose_bot.
+
+    Returns True when the message was fully handled (stop processing).
     """
     chat = msg.get("chat") or {}
     user = msg.get("from") or {}
     chat_id = chat.get("id")
     user_id = user.get("id")
     text = (msg.get("text") or msg.get("caption") or "").strip()
+
+    # Cache album parts (in-memory, cheap) so /filter can save whole
+    # media groups later. Never raises, no API calls.
+    remember_media(chat_id, msg)
+
     if (
         not is_enabled()
         or not text
@@ -246,18 +270,35 @@ def handle_group_message(msg: dict) -> bool:
         or user.get("is_bot")
         or not chat_id
         or not user_id
-        or user_id == config.OWNER_CHAT_ID
     ):
         return False
 
+    is_owner_msg = user_id == config.OWNER_CHAT_ID
+
     # SPEED: saare cheap regex checks PEHLE karo — getChatMember API call
     # (100-300ms network) sirf tab karo jab kuch match ho. Normal messages
-    # par zero Telegram API calls lagti hain.
-    term = matches_term(text)
-    promo = None if term else find_external_promo(
+    # par zero Telegram API calls lagti hain. Owner gaali/promo se exempt hai.
+    term = None if is_owner_msg else matches_term(text)
+    promo = None if (term or is_owner_msg) else find_external_promo(
         text, msg.get("entities") or msg.get("caption_entities"))
+
+    # Rose-style content filters fire for EVERYONE — owner, admins and
+    # members alike — and DELIVER content; they never delete anything.
     filt = None if (term or promo) else matches_filter(text)
-    if not term and not promo and not filt:
+    if filt:
+        word, entry = filt
+        name = (user.get("first_name") or user.get("username")
+                or "Member").strip()
+        ok = filters.deliver_filter(chat_id, word, entry,
+                                    reply_to_message_id=msg.get("message_id"))
+        log_action("filter_reply" if ok else "filter_failed", chat_id,
+                   target_id=user_id, target_name=name,
+                   reason=f"filter: {word}")
+        return True
+
+    if is_owner_msg:
+        return False  # owner is never auto-moderated
+    if not term and not promo:
         return False  # koi match nahi — zero API calls, fast path
 
     # Do not moderate or mute group admins; fail open if Telegram cannot
@@ -331,43 +372,8 @@ def handle_group_message(msg: dict) -> bool:
                        until=int(time.time()) + MUTE_MINUTES * 60)
         return True
 
-    # Owner-configured filters (Rose-style). Same guards as above apply:
-    # owner/admins/commands/bots are never touched here.
-    # ('filt' pehle hi computed hai — fast path me None tha.)
-    if filt:
-        word, entry = filt
-        name = (user.get("first_name") or user.get("username") or "Member").strip()
-        reply_text = (entry or {}).get("reply")
-        if reply_text:
-            tg_api.send_message(
-                chat_id, reply_text, reply_to_message_id=msg.get("message_id")
-            )
-            log_action("filter_reply", chat_id, target_id=user_id,
-                       target_name=name, reason=f"filter: {word}")
-            return True
-        # Bare filter = blocklist: delete + warn, repeat -> 10-min mute.
-        # Never bans.
-        count = _strike("filter_strike", chat_id, user_id)
-        delete_result = tg_api.delete_message(chat_id, msg.get("message_id"))
-        delete_failed = not delete_result.get("ok")
-        if count == 1:
-            notice = f"⚠️ {name}, ye word filter me hai — message delete kiya."
-        else:
-            mute_result = _mute(chat_id, user_id, MUTE_MINUTES)
-            if mute_result.get("ok"):
-                notice = f"⏱ {name} ko repeat filter violation par {MUTE_MINUTES} minute mute kiya. Ban nahi kiya."
-            else:
-                notice = f"⚠️ {name}, repeat filter violation. Mute apply nahi hua—bot ko Restrict Members permission chahiye."
-        if delete_failed:
-            notice += " Message delete nahi hua—bot ko Delete Messages permission chahiye."
-        tg_api.send_message(chat_id, notice)
-        log_action("filter_delete", chat_id, target_id=user_id,
-                   target_name=name, reason=f"filter: {word}")
-        if count > 1:
-            log_action("filter_automute", chat_id, target_id=user_id,
-                       target_name=name, reason=f"filter: {word}",
-                       until=int(time.time()) + MUTE_MINUTES * 60)
-        return True
+    # (Rose-style content filters were already handled ABOVE — they deliver
+    # content for everyone and never delete, exactly like @MissRose_bot.)
 
     return False
 
@@ -382,6 +388,7 @@ def manual_mute(chat_id: int, user_id: int, minutes: int) -> dict:
 # ---------------------------------------------------------------------------
 # Rose-style mod tools: /filter /filters /stop /stopall /mute /tmute /unmute
 # /ban /unban /delete /del /modlog
+# (filter store + delivery live in filters.py)
 # ---------------------------------------------------------------------------
 
 _UNMUTE_PERMISSIONS = {key: True for key in _MUTE_PERMISSIONS}
@@ -414,58 +421,6 @@ def _human_duration_token(token: str) -> str:
     words = {"s": "second", "m": "minute", "h": "ghante", "d": "din", "w": "hafte"}
     return f"{match.group(1)} {words[match.group(2).lower()]}"
 
-
-# ---------- filter store ----------
-
-def get_filters() -> dict:
-    value = get_state("mod_filters", {})
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def add_filter(word: str, reply: str | None, by_uid: int) -> str | None:
-    """Save a filter. Returns the normalized word, or None when invalid."""
-    word = _normalize(word)
-    if not word or len(word) > 64:
-        return None
-    filters = get_filters()
-    filters[word] = {
-        "reply": (reply or "").strip() or None,
-        "by": int(by_uid or 0),
-        "ts": time.time(),
-    }
-    save_state("mod_filters", filters)
-    return word
-
-
-def remove_filter(word: str) -> bool:
-    word = _normalize(word)
-    filters = get_filters()
-    if word not in filters:
-        return False
-    del filters[word]
-    save_state("mod_filters", filters)
-    return True
-
-
-def clear_filters() -> None:
-    save_state("mod_filters", {})
-
-
-def matches_filter(text: str) -> tuple[str, dict] | None:
-    """Return (word, entry) for the first matching filter, else None."""
-    normalized = _normalize(text)
-    for word, entry in get_filters().items():
-        if not word:
-            continue
-        if " " in word:
-            if word in normalized:
-                return word, entry
-        elif re.search(rf"(?<!\w){re.escape(word)}(?!\w)", normalized, re.UNICODE):
-            return word, entry
-    return None
-
-
-# ---------- action log ----------
 
 def log_action(action: str, chat_id: int, target_id=None, target_name: str = "",
                by_id: int = 0, by_name: str = "auto", reason: str = "",
@@ -630,7 +585,8 @@ def _bot_has_right(chat_id: int, right: str) -> bool:
 
 # ---------- command dispatcher ----------
 
-_MOD_CMD_RE = re.compile(r"^/(\w+?)(?:@\w+)?(?:\s+|$)", re.IGNORECASE)
+# Rose accepts commands with both / and ! prefixes (e.g. !filter loader).
+_MOD_CMD_RE = re.compile(r"^[/!](\w+?)(?:@\w+)?(?:\s+|$)", re.IGNORECASE)
 _MOD_COMMANDS = {
     "filter", "filters", "stop", "stopall",
     "mute", "tmute", "unmute",
@@ -652,20 +608,6 @@ _NEED_DELETE = ("❌ Bot ke paas Delete Messages permission nahi hai. "
                 "Bot ko group admin banao with delete rights.")
 _NEED_PIN = ("❌ Bot ke paas Pin Messages permission nahi hai. "
              "Bot ko group admin banao with pin rights.")
-
-
-def _split_filter_args(args: str) -> tuple[str | None, str]:
-    """Split '/filter' args into (word, reply). Supports quoted phrases."""
-    args = args.strip()
-    if args.startswith('"'):
-        end = args.find('"', 1)
-        if end == -1:
-            return None, ""
-        return args[1:end], args[end + 1:].strip()
-    parts = args.split(None, 1)
-    if not parts:
-        return None, ""
-    return parts[0], (parts[1] if len(parts) > 1 else "")
 
 
 def handle_mod_command(msg: dict, uid: int, chat_id: int) -> bool:
@@ -697,56 +639,18 @@ def handle_mod_command(msg: dict, uid: int, chat_id: int) -> bool:
     elif not _is_privileged(uid, chat_id):
         return say(_DENY_PRIVILEGED)
 
-    # ---- /filter ----
-    if cmd == "filter":
-        word, reply = _split_filter_args(args)
-        if not word:
-            return say("Usage: /filter <word> [reply text]\n"
-                       "Reply text diya to us word par auto-reply hoga; "
-                       "nahi diya to message auto-delete hoga (blocklist).")
-        saved = add_filter(word, reply, uid)
-        if not saved:
-            return say("❌ Filter word invalid hai (khali ya bahut lamba).")
-        log_action("filter_add", chat_id, by_id=uid, by_name=by_name,
-                   reason=f"filter: {saved}")
-        if reply:
-            return say(f'✅ Filter save ho gaya: "{saved}"\n'
-                       f'Ab is word par bot auto-reply karega.')
-        return say(f'✅ Filter save ho gaya: "{saved}"\n'
-                   f'Ab is word wala message auto-delete hoga.')
-
-    # ---- /filters ----
-    if cmd == "filters":
-        filters = get_filters()
-        if not filters:
-            return say("Koi filter nahi hai. /filter <word> [reply] se add karo.")
-        lines = ["📋 Group filters:"]
-        for word, entry in sorted(filters.items()):
-            reply_text = (entry or {}).get("reply")
-            if reply_text:
-                preview = reply_text if len(reply_text) <= 40 else reply_text[:37] + "..."
-                lines.append(f"• {word} → reply: {preview}")
-            else:
-                lines.append(f"• {word} → auto-delete")
-        return say("\n".join(lines))
-
-    # ---- /stop ----
-    if cmd == "stop":
-        word = _split_filter_args(args)[0]
-        word = _normalize(word or "")
-        if not word:
-            return say("Usage: /stop <word>")
-        if remove_filter(word):
-            log_action("filter_remove", chat_id, by_id=uid, by_name=by_name,
-                       reason=f"filter: {word}")
-            return say(f'🗑 Filter "{word}" hata diya.')
-        return say(f'❌ "{word}" naam ka filter nahi mila.')
-
-    # ---- /stopall (owner only) ----
-    if cmd == "stopall":
-        clear_filters()
-        log_action("filter_clear", chat_id, by_id=uid, by_name=by_name)
-        return say("🗑 Saare filters clear kar diye.")
+    # ---- /filter /filters /stop /stopall (Rose-style, from filters.py) ----
+    if cmd in ("filter", "filters", "stop", "stopall"):
+        if cmd == "filter":
+            log_action("filter_add", chat_id, by_id=uid, by_name=by_name,
+                       reason=f"filter command by {by_name}")
+        elif cmd == "stop":
+            log_action("filter_remove", chat_id, by_id=uid,
+                       by_name=by_name, reason=f"stop: {args[:64]}")
+        elif cmd == "stopall":
+            log_action("filter_clear", chat_id, by_id=uid, by_name=by_name)
+        return filters.handle_filter_command(msg, uid, chat_id, cmd, args,
+                                              say)
 
     # ---- /modlog ----
     if cmd == "modlog":

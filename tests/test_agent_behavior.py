@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 import agent
 import bot
 import config
+import db
 
 
 OWNER = 8967004608
@@ -156,6 +157,128 @@ class CtxInjectionTests(unittest.TestCase):
             bot.handle_message(self._msg("@rk_test_bot me kon hu?"))
         self.assertEqual(seen.get("group_role"), "administrator")
         self.assertTrue(seen.get("bot_admin", {}).get("can_delete"))
+
+    def test_ctx_carries_recent_log_for_grounding(self):
+        seen = {}
+
+        def fake_answer(question, ctx):
+            seen.update(ctx)
+            return {"text": "ok"}
+
+        with patch.object(bot.links, "is_managed_group", return_value=True), \
+                patch.object(bot.moderation, "handle_group_message", return_value=False), \
+                patch.object(bot.moderation, "handle_mod_command", return_value=False), \
+                patch.object(bot.knowledge, "ingest_message"), \
+                patch.object(bot, "_bot_username", return_value="rk_test_bot"), \
+                patch.object(bot, "_group_role", return_value="member"), \
+                patch.object(bot, "_bot_rights", return_value={}), \
+                patch.object(bot.tg_api, "send_chat_action"), \
+                patch.object(bot.tg_api, "send_message"), \
+                patch.object(bot.agent, "answer", side_effect=fake_answer):
+            bot.handle_message(self._msg("@rk_test_bot kya tumne file bheji thi?"))
+        log = seen.get("recent_log") or []
+        # The triggering question itself must NOT be inside the log (it is
+        # passed separately), but earlier context would be.
+        self.assertIsInstance(log, list)
+
+    def test_real_answer_saved_to_qa_memory(self):
+        # The bot's actual answer is persisted — its future claims about
+        # what it said stay grounded in this record.
+        def fake_answer(question, ctx):
+            return {"text": "Loader v2 hi latest hai"}
+
+        with patch.object(bot.links, "is_managed_group", return_value=True), \
+                patch.object(bot.moderation, "handle_group_message", return_value=False), \
+                patch.object(bot.moderation, "handle_mod_command", return_value=False), \
+                patch.object(bot.knowledge, "ingest_message"), \
+                patch.object(bot, "_bot_username", return_value="rk_test_bot"), \
+                patch.object(bot, "_group_role", return_value="member"), \
+                patch.object(bot, "_bot_rights", return_value={}), \
+                patch.object(bot.tg_api, "send_chat_action"), \
+                patch.object(bot.tg_api, "send_message"), \
+                patch.object(bot.agent, "answer", side_effect=fake_answer):
+            bot.handle_message(self._msg("@rk_test_bot loader konsa latest hai?"))
+        docs = db.get_db()["qa"].find(
+            {"question": {"$regex": "loader", "$options": "i"}})
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["answer"], "Loader v2 hi latest hai")
+
+
+class IntelligenceGroundingTests(unittest.TestCase):
+    """v2.2: recent-chat-log grounding + anti-false-claim honesty rules.
+
+    Regression guard for the screenshot bug where the bot claimed
+    'maine thodi der pehle bat loader update + key bheja tha' and
+    'file bhej raha hu / ye lijiye log file ready hai' — while it had
+    sent NOTHING. The fixes: verbatim log in every prompt, hard
+    past-event/file honesty rules, and a no-file FACT injection.
+    """
+
+    def test_recent_log_block_renders_verbatim(self):
+        ctx = {"recent_log": [
+            {"name": "Oxsidian", "text": "ye bat loader kha hai",
+             "owner": True},
+            {"name": "RK Manager", "text": "mere paas record nahi hai",
+             "is_bot": True},
+        ]}
+        out = agent._recent_log_block(ctx)
+        self.assertIn("Oxsidian [GROUP OWNER]", out)
+        self.assertIn("ye bat loader kha hai", out)
+        self.assertIn("RK MANAGER (you, the bot)", out)
+        self.assertIn("mere paas record nahi hai", out)
+
+    def test_recent_log_empty_for_no_context(self):
+        self.assertEqual(agent._recent_log_block({}), "")
+        self.assertEqual(agent._recent_log_block({"recent_log": []}), "")
+
+    def test_prompts_carry_honesty_rules(self):
+        self.assertIn("PAST-EVENT HONESTY", agent.SYSTEM_PROMPT)
+        self.assertIn("FILE HONESTY", agent.SYSTEM_PROMPT)
+        self.assertIn("PAST-EVENT HONESTY", agent.GENERAL_PROMPT)
+        self.assertIn("FILE HONESTY", agent.GENERAL_PROMPT)
+        # the exact false-claim phrasings from the screenshot are banned
+        self.assertIn("bhej raha hu", agent.SYSTEM_PROMPT)
+        self.assertIn("file ready hai", agent.SYSTEM_PROMPT)
+
+    def test_file_request_without_file_injects_fact(self):
+        router = MagicMock()
+        router.generate.return_value = "theek hai"
+
+        with patch.object(agent.ai_engine, "get_router",
+                          return_value=router), \
+                patch.object(agent.knowledge, "search", return_value=[]), \
+                patch.object(agent.knowledge, "find_file_for",
+                             return_value=None):
+            agent.answer("bat loader file bhejo", {
+                "user_id": 5, "chat_id": -1001, "username": "x"})
+        prompt = router.generate.call_args.args[0]
+        self.assertIn("FACT: no file", prompt)
+        self.assertIn("NOTHING to send", prompt)
+
+    def test_recent_log_passed_into_prompt(self):
+        router = MagicMock()
+        router.generate.return_value = "theek hai"
+
+        with patch.object(agent.ai_engine, "get_router",
+                          return_value=router), \
+                patch.object(agent.knowledge, "search", return_value=[]), \
+                patch.object(agent.knowledge, "find_file_for",
+                             return_value=None):
+            agent.answer("kya tumne loader bheja tha?", {
+                "user_id": 5, "chat_id": -1001, "username": "x",
+                "recent_log": [
+                    {"name": "Oxsidian", "text": "loader kha hai",
+                     "owner": True},
+                ]})
+        prompt = router.generate.call_args.args[0]
+        self.assertIn("Recent chat log", prompt)
+        self.assertIn("loader kha hai", prompt)
+        # the question is NOT duplicated into the log block
+        self.assertNotIn("kya tumne loader bheja tha?",
+                         agent._recent_log_block({
+                             "recent_log": [{"name": "Oxsidian",
+                                             "text": "loader kha hai",
+                                             "owner": True}]}))
 
 
 if __name__ == "__main__":

@@ -20,18 +20,22 @@ import tg_api
 # invents a refusal like "mere paas power nahi hai".
 _CAPABILITIES = (
     "Your real group moderation tools — never deny having these: "
-    "/filter (auto-reply or auto-delete on a word), /filters (list them), "
-    "/stop (remove a filter), /mute, /tmute (temp mute like 30m/2h/1d), "
+    "/filter (Rose-style: reply karke koi bhi message — file, video, "
+    "photo, text — as-is save hota hai; jab bhi koi word bolega, bot "
+    "usi content ko REPLY me bhejta hai — delete kabhi nahi hota), "
+    "/filters (list them), /stop (remove a filter), /stopall, "
+    "/mute, /tmute (temp mute like 30m/2h/1d), "
     "/unmute, /delete (delete a replied message), /warn /warnings "
     "/resetwarns (warning system: 3 warns = 1h auto-mute), /purge (bulk "
     "delete), /pin /unpin, /kick (owner), /ban and /unban (OWNER ONLY), "
     "/files (list channel files), /stats, /id, /report, /help, /rules, "
-    "/sikhao (owner teaches you tasks). Mute/unmute targets work by REPLY, "
+    "/sikhao (owner teaches you tasks). Commands work with BOTH / and ! "
+    "prefix (jaise !filter loader). Mute/unmute targets work by REPLY, "
     "user ID, @username OR plain naam (jaise 'rich'). Your auto-moderation "
     "also acts by itself: abuse words get deleted (warn first, mute on "
-    "repeat — never auto-ban), and filters set by the owner trigger "
-    "automatically. If someone asks about your commands or powers, list "
-    "these briefly and truthfully. Never invent a missing ability. "
+    "repeat — never auto-ban). If someone asks about your commands or "
+    "powers, list these briefly and truthfully. Never invent a missing "
+    "ability. "
     "You can also SEE photos, LISTEN to voice messages, and WATCH short "
     "videos users send — they arrive attached to the message, use them. "
     "You can deliver files from the linked channel on request."
@@ -56,6 +60,25 @@ SYSTEM_PROMPT = (
     "asked about someone's past conversation and the context has no record "
     "of it, say naturally in the user's language that you don't have that "
     "record — do not refuse with a canned line. "
+    "PAST-EVENT HONESTY (CRITICAL — never violate): the 'Recent chat log' "
+    "and the context below are the ONLY records of what was actually said "
+    "or sent. When the user asks about anything from the past ('kya bheja "
+    "tha', 'kab diya tha', 'maine bheja tha?'), trust ONLY that record. "
+    "If the record does not show it, it did NOT happen — say honestly in "
+    "the user's language that you have no record of it (e.g. 'mere paas "
+    "iska koi record nahi hai'). NEVER say 'maine diya tha / bheja tha / "
+    "share kiya tha / bataya tha' unless the record literally shows RK "
+    "MANAGER (you) sending or doing it. "
+    "FILE HONESTY (CRITICAL — never violate): you can write TEXT only — "
+    "you CANNOT attach files, photos, videos or documents yourself. NEVER "
+    "write 'file bhej di / bhej raha hu / bhej dunga / file ready hai / "
+    "attach kar diya / le lijiye file'. If the user wants a file: if the "
+    "context shows the file exists (channel post or saved filter), tell "
+    "them the file will be delivered automatically (the system sends it "
+    "for you). If NO file exists in your records, say honestly that you "
+    "don't have it right now — suggest the owner post it to the channel "
+    "(/post) or save a /filter for that word so it gets delivered "
+    "instantly. "
     "Reply in the user's language (Hindi, Hinglish ok). Be concise, friendly "
     "and chat-like — like a group member, not a robot. "
     "You are also the group's MANAGER, not just a Q&A bot — think like one: "
@@ -121,6 +144,13 @@ GENERAL_PROMPT = (
     "that information is explicitly present in context. If asked about a "
     "person's past messages and there is no matching context, say you do "
     "not have that history. "
+    "PAST-EVENT HONESTY: never say 'maine diya/bheja tha' about anything "
+    "the context does not literally show you doing — if there is no "
+    "record, it did not happen; say you have no record of it. "
+    "FILE HONESTY: you write TEXT only — you cannot attach or send files. "
+    "Never write 'file bhej di / bhej raha hu / file ready hai'. If the "
+    "user wants a file you have no record of, say you don't have it and "
+    "suggest the owner share it via the channel or a /filter. "
     + _CAPABILITIES
 )
 
@@ -215,7 +245,8 @@ def _maybe_deep_lookup(first_text: str | None, question: str,
         "IMPORTANT: Be honest about what you checked — you searched the group's "
         "learned knowledge/messages, NOT live Telegram state. Never claim you "
         "fetched the live member list, verified who is online, or checked live "
-        "group info."
+        "group info. Never claim to have sent a file or to send one — you "
+        "cannot attach files; if nothing was found, say so honestly."
     )
     try:
         final = ai_engine.get_router().generate(prompt, system=system)
@@ -258,6 +289,36 @@ _MEDIA_NOTE = {
     "voice": "ek voice message (audio)",
     "video": "ek video",
 }
+
+
+def _recent_log_block(user_ctx: dict) -> str:
+    """Render the actual recent chat log (what REALLY happened).
+
+    This is the grounding record for past-event questions: the model sees
+    verbatim who said what — including its own earlier replies — so it can
+    never honestly claim it 'sent' something the log does not show.
+    """
+    recent = user_ctx.get("recent_log") or []
+    if not recent:
+        return ""
+    lines = []
+    for m in recent[-14:]:
+        if not isinstance(m, dict):
+            continue
+        text = str(m.get("text") or "").strip()
+        if not text:
+            continue
+        if m.get("is_bot"):
+            who = "RK MANAGER (you, the bot)"
+        else:
+            who = str(m.get("name") or "member")
+            if m.get("owner"):
+                who += " [GROUP OWNER]"
+        lines.append(f"[{who}] {text[:300]}")
+    if not lines:
+        return ""
+    return "Recent chat log (verbatim — what ACTUALLY happened, newest " \
+           "last):\n" + "\n".join(lines)
 
 
 def _generate_answer(prompt: str, system: str, user_ctx: dict) -> str:
@@ -332,11 +393,26 @@ def answer(question: str, user_ctx: dict) -> dict:
     ctx_block = _format_context(hits)
     who_block = _role_context(user_ctx)
     standing = rules.rules_block()
+    log_block = _recent_log_block(user_ctx)
+    # Honest fact: the user seems to want a file, but nothing matching
+    # exists in our storage. Injected so the model can NEVER pretend to
+    # send one (the 'file bhej raha hu' hallucination is killed here).
+    file_fact = ""
+    if _looks_like_file_request(question) and not file_hit:
+        file_fact = (
+            "FACT: no file/document/media matching this request exists in "
+            "your records (channel storage or saved filters). You have "
+            "NOTHING to send. Do NOT claim to send/attach anything. Say "
+            "honestly you don't have it right now and suggest the owner "
+            "share it (channel /post ya /filter word se).\n\n"
+        )
     if hits and ctx_block:
         prompt = (
             (standing + "\n\n" if standing else "")
+            + (f"{log_block}\n\n" if log_block else "")
             + f"Context (learned from channel + group):\n{ctx_block}\n\n"
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
+            + file_fact
             + f"User question ({user_ctx.get('first_name') or user_ctx.get('username') or 'user'}): {question}\n"
             "Answer:"
         )
@@ -388,9 +464,12 @@ def answer(question: str, user_ctx: dict) -> dict:
     try:
         who_block = _role_context(user_ctx)
         standing = rules.rules_block()
+        log_block = _recent_log_block(user_ctx)
         qprompt = (
             (standing + "\n\n" if standing else "")
+            + (f"{log_block}\n\n" if log_block else "")
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
+            + file_fact
             + f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:"
         )
         text = _generate_answer(qprompt, GENERAL_PROMPT, user_ctx)

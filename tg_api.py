@@ -240,7 +240,8 @@ def forward_message(to_chat_id, from_chat_id, message_id) -> dict:
     })
 
 
-def send_document(chat_id, file_id_or_path, caption=None) -> dict:
+def send_document(chat_id, file_id_or_path, caption=None,
+                  reply_to_message_id=None) -> dict:
     if isinstance(file_id_or_path, str) and file_id_or_path.startswith("@"):
         path = file_id_or_path[1:]
         try:
@@ -251,26 +252,67 @@ def send_document(chat_id, file_id_or_path, caption=None) -> dict:
         filename = path.rsplit("/", 1)[-1] or "document"
         return api(
             "sendDocument",
-            {"chat_id": chat_id, "caption": caption},
+            {"chat_id": chat_id, "caption": caption,
+             "reply_to_message_id": reply_to_message_id},
             files={"document": (filename, data, "application/octet-stream")},
         )
-    return api("sendDocument", {"chat_id": chat_id, "document": file_id_or_path, "caption": caption})
+    return api("sendDocument", {"chat_id": chat_id, "document": file_id_or_path,
+                                 "caption": caption,
+                                 "reply_to_message_id": reply_to_message_id})
 
 
-def send_photo(chat_id, file_id, caption=None) -> dict:
-    return api("sendPhoto", {"chat_id": chat_id, "photo": file_id, "caption": caption})
+def send_photo(chat_id, file_id, caption=None,
+               reply_to_message_id=None) -> dict:
+    return api("sendPhoto", {"chat_id": chat_id, "photo": file_id,
+                             "caption": caption,
+                             "reply_to_message_id": reply_to_message_id})
 
 
-def send_video(chat_id, file_id, caption=None) -> dict:
-    return api("sendVideo", {"chat_id": chat_id, "video": file_id, "caption": caption})
+def send_video(chat_id, file_id, caption=None,
+               reply_to_message_id=None) -> dict:
+    return api("sendVideo", {"chat_id": chat_id, "video": file_id,
+                             "caption": caption,
+                             "reply_to_message_id": reply_to_message_id})
 
 
-def send_audio(chat_id, file_id, caption=None) -> dict:
-    return api("sendAudio", {"chat_id": chat_id, "audio": file_id, "caption": caption})
+def send_audio(chat_id, file_id, caption=None,
+               reply_to_message_id=None) -> dict:
+    return api("sendAudio", {"chat_id": chat_id, "audio": file_id,
+                             "caption": caption,
+                             "reply_to_message_id": reply_to_message_id})
 
 
-def send_voice(chat_id, file_id, caption=None) -> dict:
-    return api("sendVoice", {"chat_id": chat_id, "voice": file_id, "caption": caption})
+def send_voice(chat_id, file_id, caption=None,
+               reply_to_message_id=None) -> dict:
+    return api("sendVoice", {"chat_id": chat_id, "voice": file_id,
+                             "caption": caption,
+                             "reply_to_message_id": reply_to_message_id})
+
+
+def send_animation(chat_id, file_id, caption=None,
+                   reply_to_message_id=None) -> dict:
+    return api("sendAnimation", {"chat_id": chat_id, "animation": file_id,
+                                 "caption": caption,
+                                 "reply_to_message_id": reply_to_message_id})
+
+
+def send_sticker(chat_id, file_id, reply_to_message_id=None) -> dict:
+    return api("sendSticker", {"chat_id": chat_id, "sticker": file_id,
+                               "reply_to_message_id": reply_to_message_id})
+
+
+def send_video_note(chat_id, file_id, reply_to_message_id=None) -> dict:
+    return api("sendVideoNote", {"chat_id": chat_id, "video_note": file_id,
+                                 "reply_to_message_id": reply_to_message_id})
+
+
+def send_media_group(chat_id, media: list,
+                     reply_to_message_id=None) -> dict:
+    """Send 2-10 photo/video/document/audio items as one grouped album."""
+    return api("sendMediaGroup", {
+        "chat_id": chat_id, "media": media,
+        "reply_to_message_id": reply_to_message_id,
+    })
 
 
 def leave_chat(chat_id) -> dict:
@@ -292,27 +334,44 @@ def delete_webhook(drop_pending=False) -> dict:
     return api("deleteWebhook", {"drop_pending_updates": drop_pending})
 
 
-def send_any_file(chat_id: int, file_id: str, file_type: str, caption: str = None) -> dict:
+def send_any_file(chat_id: int, file_id: str, file_type: str,
+                 caption: str = None, reply_to_message_id=None) -> dict:
     """Send a stored media file by its stored file_id and detected type."""
     t = (file_type or "").lower()
     if t == "photo":
-        return send_photo(chat_id, file_id, caption=caption)
+        return send_photo(chat_id, file_id, caption=caption,
+                          reply_to_message_id=reply_to_message_id)
     if t == "video":
-        return send_video(chat_id, file_id, caption=caption)
+        return send_video(chat_id, file_id, caption=caption,
+                          reply_to_message_id=reply_to_message_id)
     if t == "audio":
-        return send_audio(chat_id, file_id, caption=caption)
+        return send_audio(chat_id, file_id, caption=caption,
+                          reply_to_message_id=reply_to_message_id)
     if t == "voice":
-        return send_voice(chat_id, file_id, caption=caption)
-    return send_document(chat_id, file_id, caption=caption)
+        return send_voice(chat_id, file_id, caption=caption,
+                          reply_to_message_id=reply_to_message_id)
+    if t == "animation":
+        return send_animation(chat_id, file_id, caption=caption,
+                              reply_to_message_id=reply_to_message_id)
+    if t == "sticker":
+        return send_sticker(chat_id, file_id,
+                            reply_to_message_id=reply_to_message_id)
+    if t == "video_note":
+        return send_video_note(chat_id, file_id,
+                               reply_to_message_id=reply_to_message_id)
+    return send_document(chat_id, file_id, caption=caption,
+                         reply_to_message_id=reply_to_message_id)
 
 
 # ---------------------- Power upgrade additions ----------------------
 
-def copy_message(to_chat_id, from_chat_id, message_id, caption=None) -> dict:
-    """Copy a message without the 'Forwarded from' header."""
+def copy_message(to_chat_id, from_chat_id, message_id, caption=None,
+                 reply_to_message_id=None) -> dict:
+    """Copy a message without the 'Forwarded from' header (as-is clone)."""
     return api("copyMessage", {
         "chat_id": to_chat_id, "from_chat_id": from_chat_id,
         "message_id": message_id, "caption": caption,
+        "reply_to_message_id": reply_to_message_id,
     })
 
 
