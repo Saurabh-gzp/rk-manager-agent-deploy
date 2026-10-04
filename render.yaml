@@ -1,0 +1,61 @@
+# Render blueprint for RK Manager Agent.
+#
+# Deploy: Render Dashboard -> New -> Blueprint -> select this repo.
+# Set secret env vars in dashboard (never commit values).
+#
+# Free tier compatible: use the WEB SERVICE block below (uncomment) for webhook
+# mode. Otherwise background worker (polling) needs a paid plan.
+
+services:
+  # ----- Option A: background worker (long-polling) -----
+  - type: worker
+    name: rk-manager-agent
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_KEYS
+        sync: false
+      - key: DEEPSEEK_KEY
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: OWNER_CHAT_ID
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: DEFAULT_MODEL
+        value: gemini-2.5-flash-lite
+      - key: PYTHON_VERSION
+        value: 3.12.0
+
+  # ----- Option B: web service (webhook mode, free tier) -----
+  # Uncomment + delete the worker above to use this instead. Set WEBHOOK_URL to
+  # this service's public URL after first deploy.
+  #
+  # - type: web
+  #   name: rk-manager-agent-web
+  #   env: python
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: python3 bot.py
+  #   envVars:
+  #     - key: TELEGRAM_BOT_TOKEN
+  #       sync: false
+  #     - key: GEMINI_KEYS
+  #       sync: false
+  #     - key: DEEPSEEK_KEY
+  #       sync: false
+  #     - key: MONGODB_URI
+  #       sync: false
+  #     - key: OWNER_CHAT_ID
+  #       sync: false
+  #     - key: ADMIN_CHAT_ID
+  #       sync: false
+  #     - key: WEBHOOK_URL
+  #       sync: false
+  #     - key: DEFAULT_MODEL
+  #       value: gemini-2.5-flash-lite
+  #     - key: PYTHON_VERSION
+  #       value: 3.12.0
