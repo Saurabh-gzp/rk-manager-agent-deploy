@@ -124,33 +124,46 @@ def handle_callback(cb) -> bool:
 
     if action == "group":
         gid = links.get_group_id()
-        title = get_state("group_title") or "—"
+        title = get_state("group_title") or "-"
         kb = {"inline_keyboard": [
-            [{"text": "🔄 Refresh", "callback_data": "p:group"}],
-            [{"text": "🗑 Clear", "callback_data": "p:group_clear"}],
-            [{"text": "🚪 Leave group", "callback_data": "p:group_leave"}],
-            [{"text": "⬅️ Back", "callback_data": "p:back"}],
+            [{"text": "Refresh", "callback_data": "p:group"}],
+            [{"text": "Set by Forward", "callback_data": "p:group_fwd"}],
+            [{"text": "Clear", "callback_data": "p:group_clear"}],
+            [{"text": "Leave group", "callback_data": "p:group_leave"}],
+            [{"text": "Back", "callback_data": "p:back"}],
         ]}
         if not gid:
             text = (
-                "➕ Group Admin\n\n"
-                "Abhi koi group set nahi hai. Neeche button se bot ko group me add karo.\n"
-                "Bot admin banake wapas yahan aao — auto-detect ho jayega."
+                "Group Admin\n\n"
+                "Abhi koi group set nahi hai.\n\n"
+                "Setup ke 2 tarike:\n"
+                "1) Add bot to group - niche button dabao, group me add karo (admin banao), bot auto-detect karega\n"
+                "2) Set by Forward - kisi bhi group se ek message yahan DM me forward karo, bot uska chat ID use karega"
             )
             kb["inline_keyboard"].insert(0, [
-                {"text": "➕ Add bot to group", "url": _addgroup_url()}
+                {"text": "Add bot to group", "url": _addgroup_url()}
             ])
         else:
             text = (
-                f"➕ Group Admin\n\n"
-                f"Group ID: `{gid}`\n"
-                f"Title: {title}\n\n"
+                f"Group Admin\n\n"
+                f"Group ID: {gid}\n"
+                f"Title: {title}\n"
                 f"Members: {tg_api.get_chat_member_count(gid)}"
             )
-        _edit(chat_id, message_id, text, reply_markup=kb, parse_mode="Markdown")
+        _edit(chat_id, message_id, text, reply_markup=kb)
         _answer(cb_id)
         return True
 
+    if action == "group_fwd":
+        save_state(f"{from_uid}:group_fwd_mode", True)
+        _edit(chat_id, message_id,
+              "Set Group by Forward\n\n"
+              "Apne target group se koi bhi message yahan DM me forward karo.\n"
+              "Bot us group ka chat ID pakad ke set kar dega.\n\n"
+              "Cancel: /cancel",
+              reply_markup=_back())
+        _answer(cb_id)
+        return True
     if action == "group_clear":
         links.clear_group()
         _edit(chat_id, message_id, "✅ Group cleared.", reply_markup=_back())
@@ -170,30 +183,41 @@ def handle_callback(cb) -> bool:
 
     if action == "channel":
         cid = links.get_channel_id()
-        title = get_state("channel_title") or "—"
+        title = get_state("channel_title") or "-"
         kb = {"inline_keyboard": [
-            [{"text": "🔄 Refresh", "callback_data": "p:channel"}],
-            [{"text": "🗑 Clear", "callback_data": "p:channel_clear"}],
-            [{"text": "🚪 Leave channel", "callback_data": "p:channel_leave"}],
-            [{"text": "⬅️ Back", "callback_data": "p:back"}],
+            [{"text": "Refresh", "callback_data": "p:channel"}],
+            [{"text": "Set by Forward", "callback_data": "p:channel_fwd"}],
+            [{"text": "Clear", "callback_data": "p:channel_clear"}],
+            [{"text": "Leave channel", "callback_data": "p:channel_leave"}],
+            [{"text": "Back", "callback_data": "p:back"}],
         ]}
         if not cid:
             text = (
-                "📢 Channel Admin\n\n"
-                "Abhi koi channel set nahi.\n"
-                "Steps:\n"
-                "1) Channel kholo > ⋮ > Administrators > Add > @yourbot search\n"
-                "2) 'Post messages' permission de do\n"
-                "3) Bot add hone par auto-detect hoga"
+                "Channel Admin\n\n"
+                "Abhi koi channel set nahi.\n\n"
+                "Setup ke 2 tarike:\n"
+                "1) Channel kholo > Administrators > Add > @rkgamermanagerbot search, Post messages permission de do\n"
+                "2) Set by Forward — kisi bhi channel se ek message yahan DM me forward karo, bot uska chat ID use karega"
             )
         else:
             text = (
-                f"📢 Channel Admin\n\n"
-                f"Channel ID: `{cid}`\n"
+                f"Channel Admin\n\n"
+                f"Channel ID: {cid}\n"
                 f"Title: {title}\n"
                 f"Subscribers: {tg_api.get_chat_member_count(cid)}"
             )
-        _edit(chat_id, message_id, text, reply_markup=kb, parse_mode="Markdown")
+        _edit(chat_id, message_id, text, reply_markup=kb)
+        _answer(cb_id)
+        return True
+
+    if action == "channel_fwd":
+        save_state(f"{from_uid}:channel_fwd_mode", True)
+        _edit(chat_id, message_id,
+              "Set Channel by Forward\n\n"
+              "Apne target channel se koi bhi message yahan DM me forward karo.\n"
+              "Bot us channel ka chat ID pakad ke set kar dega.\n\n"
+              "Cancel: /cancel",
+              reply_markup=_back())
         _answer(cb_id)
         return True
 
@@ -217,16 +241,16 @@ def handle_callback(cb) -> bool:
     if action == "link":
         gid = links.get_group_id()
         cid = links.get_channel_id()
-        text = "🔗 Link Group ↔ Channel\n\n"
+        text = "Link Group <-> Channel\n\n"
         if gid and cid:
-            text += f"✅ Linked:\nGroup: `{gid}`\nChannel: `{cid}`"
+            text += f"Linked:\nGroup: {gid}\nChannel: {cid}"
         else:
             text += (
-                f"Group: {'`' + str(gid) + '`' if gid else '❌ not set'}\n"
-                f"Channel: {'`' + str(cid) + '`' if cid else '❌ not set'}\n\n"
+                f"Group: {gid if gid else 'not set'}\n"
+                f"Channel: {cid if cid else 'not set'}\n\n"
                 "Dono set karne ke baad auto-link ho jayega."
             )
-        _edit(chat_id, message_id, text, reply_markup=_back(), parse_mode="Markdown")
+        _edit(chat_id, message_id, text, reply_markup=_back())
         _answer(cb_id)
         return True
 
@@ -528,4 +552,74 @@ def handle_forget_mode_text(msg) -> bool:
     n = knowledge.forget_query(text)
     save_state(f"{uid}:forget_mode", False)
     _send(chat_id, f"🗑 {n} rows bhula diye for query: {text}")
+    return True
+
+
+def handle_group_fwd(msg) -> bool:
+    """Owner forwarded a message from a group -> save it as managed group."""
+    uid = (msg.get("from") or {}).get("id")
+    chat_id = (msg.get("chat") or {}).get("id")
+    if not _is_owner(uid):
+        return False
+    if not get_state(f"{uid}:group_fwd_mode"):
+        return False
+    if (msg.get("text") or "").strip() in ("/cancel", "/back"):
+        save_state(f"{uid}:group_fwd_mode", False)
+        _send(chat_id, "Cancelled.")
+        return True
+    origin = msg.get("forward_from_chat") or {}
+    origin_id = origin.get("id")
+    origin_type = origin.get("type")
+    if not origin_id or origin_type not in ("group", "supergroup"):
+        _send(chat_id,
+              "Ye message group se forwarded nahi hai.\n"
+              "Target group se forward karo (kisi member ka msg ya apna msg).")
+        return True
+    title = origin.get("title") or origin.get("username") or "Group"
+    prev = links.get_group_id()
+    links.set_group(int(origin_id), title)
+    if prev and prev != origin_id:
+        try:
+            tg_api.leave_chat(prev)
+        except Exception:
+            pass
+    save_state(f"{uid}:group_fwd_mode", False)
+    _send(chat_id,
+          f"Group set!\n\nTitle: {title}\nID: {origin_id}\n\n"
+          f"Ab main is group me kaam karunga. /start daba ke panel dekh lo.")
+    return True
+
+
+def handle_channel_fwd(msg) -> bool:
+    """Owner forwarded a message from a channel -> save it as managed channel."""
+    uid = (msg.get("from") or {}).get("id")
+    chat_id = (msg.get("chat") or {}).get("id")
+    if not _is_owner(uid):
+        return False
+    if not get_state(f"{uid}:channel_fwd_mode"):
+        return False
+    if (msg.get("text") or "").strip() in ("/cancel", "/back"):
+        save_state(f"{uid}:channel_fwd_mode", False)
+        _send(chat_id, "Cancelled.")
+        return True
+    origin = msg.get("forward_from_chat") or {}
+    origin_id = origin.get("id")
+    origin_type = origin.get("type")
+    if not origin_id or origin_type != "channel":
+        _send(chat_id,
+              "Ye message channel se forwarded nahi hai.\n"
+              "Target channel se forward karo.")
+        return True
+    title = origin.get("title") or origin.get("username") or "Channel"
+    prev = links.get_channel_id()
+    links.set_channel(int(origin_id), title)
+    if prev and prev != origin_id:
+        try:
+            tg_api.leave_chat(prev)
+        except Exception:
+            pass
+    save_state(f"{uid}:channel_fwd_mode", False)
+    _send(chat_id,
+          f"Channel set!\n\nTitle: {title}\nID: {origin_id}\n\n"
+          f"Ab main is channel ke posts seekhunga.")
     return True

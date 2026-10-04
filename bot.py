@@ -90,19 +90,38 @@ def _is_private_admin(uid: int) -> bool:
 # ---------------- handlers ----------------
 
 def handle_my_chat_member(update) -> None:
+    """Strict: only owner can activate the bot in a chat.
+
+    If anyone else adds the bot to a group/channel, the bot says
+    'join @rkgamersbgmi' and leaves immediately. If the owner adds it,
+    the chat is auto-set as the managed one and owner is notified in DM.
+    """
     cm = update.get("my_chat_member") or {}
     chat = cm.get("chat") or {}
     new = cm.get("new_chat_member") or {}
+    old = cm.get("old_chat_member") or {}
+    by = cm.get("from") or {}
+
     status = new.get("status")
+    old_status = old.get("status")
     chat_id = chat.get("id")
     chat_type = chat.get("type")
     title = chat.get("title") or chat.get("username") or "—"
+    adder_id = by.get("id")
 
+    # Bot was kicked / left — clear if it was our managed one
     if status in ("kicked", "left"):
-        # auto-clear if it was our managed one
         if links.is_managed_group(chat_id):
             links.clear_group()
             log(f"left managed group {chat_id}")
+            try:
+                tg_api.send_message(
+                    config.OWNER_CHAT_ID,
+                    f"⚠️ Main group `{title}` se nikal diya gaya. "
+                    "Wapas add karoge to auto-set ho jayega.",
+                )
+            except Exception:
+                pass
         elif links.is_managed_channel(chat_id):
             links.clear_channel()
             log(f"left managed channel {chat_id}")
@@ -111,36 +130,115 @@ def handle_my_chat_member(update) -> None:
     if status not in ("administrator", "member", "creator"):
         return
 
-    # Auto-set if not already configured
-    if chat_type in ("group", "supergroup"):
-        if not links.get_group_id():
-            links.set_group(chat_id, title)
-            log(f"auto-set group: {chat_id} {title}")
-        elif links.get_group_id() != chat_id:
-            # not our main group, just greet
+    # Only act on first-time addition (not on promotions or status changes)
+    if old_status not in ("left", "kicked", None):
+        return
+
+    # Owner-less deployment: refuse everything
+    if not config.OWNER_CHAT_ID:
+        try:
+            tg_api.send_message(chat_id, "Bot is not configured yet. Owner se contact karo.")
+        except Exception:
             pass
-        greeting = (
-            "👋 Namaste! Main RK Manager hoon.\n\n"
-            "✅ Is group ko maine apna primary group bana liya.\n"
-            "Ab main yahan ki har chat se seekhunga aur members ke sawalon ka jawab dunga."
+        try:
+            tg_api.leave_chat(chat_id)
+        except Exception:
+            pass
+        return
+
+    # NON-OWNER added: refuse + leave
+    if adder_id != config.OWNER_CHAT_ID:
+        join_msg = (
+            "🙏 Yeh bot RK Manager Agent hai.\n\n"
+            "Ye sirf apne owner ke group/channel me kaam karta hai.\n"
+            "Aap isko yahan add karke use nahi kar sakte.\n\n"
+            "👉 Hamara official group join karo:\n"
+            "@rkgamersbgmi\n\n"
+            "Wahan se owner se baat karke apna setup karwa sakte ho."
         )
-        tg_api.send_message(chat_id, greeting)
+        try:
+            tg_api.send_message(chat_id, join_msg)
+        except Exception:
+            pass
+        try:
+            tg_api.leave_chat(chat_id)
+        except Exception:
+            pass
+        # log + notify owner
+        log(f"refused non-owner add to {chat_type} {chat_id} by {adder_id}")
+        try:
+            tg_api.send_message(
+                config.OWNER_CHAT_ID,
+                f"⚠️ Kisi ne ({adder_id}) bot ko apne {chat_type} me add kiya: "
+                f"{title}. Maine reject kar diya aur leave kar diya.",
+            )
+        except Exception:
+            pass
+        return
+
+    # OWNER added: auto-set as managed chat
+    if chat_type in ("group", "supergroup"):
+        prev = links.get_group_id()
+        links.set_group(chat_id, title)
+        if prev and prev != chat_id:
+            try:
+                tg_api.leave_chat(prev)
+            except Exception:
+                pass
+        try:
+            tg_api.send_message(
+                chat_id,
+                "👋 Namaste! Main RK Manager hoon.\n\n"
+                "✅ Is group ko apna primary group bana liya.\n"
+                "Ab har chat se seekhunga aur members ke sawalon ka jawab dunga.",
+            )
+        except Exception:
+            pass
+        try:
+            tg_api.send_message(
+                config.OWNER_CHAT_ID,
+                f"✅ Group auto-set!\n\nTitle: {title}\nID: `{chat_id}`\n\n"
+                f"Ab main is group me kaam karunga. Baki kisi aur group me add karne par reject kar dunga.",
+            )
+        except Exception:
+            pass
     elif chat_type == "channel":
-        if not links.get_channel_id():
-            links.set_channel(chat_id, title)
-            log(f"auto-set channel: {chat_id} {title}")
-        # Check admin status
+        prev = links.get_channel_id()
+        links.set_channel(chat_id, title)
+        if prev and prev != chat_id:
+            try:
+                tg_api.leave_chat(prev)
+            except Exception:
+                pass
         me = tg_api.get_me()
         bot_id = me.get("id")
         admins = tg_api.get_chat_administrators(chat_id) or []
         is_admin = any((a.get("user") or {}).get("id") == bot_id for a in admins)
         if is_admin:
-            tg_api.send_message(chat_id, "✅ Channel se seekhna shuru! Posts auto-index hongi.")
+            try:
+                tg_api.send_message(chat_id, "✅ Channel se seekhna shuru! Posts auto-index hongi.")
+            except Exception:
+                pass
         else:
-            tg_api.send_message(chat_id, "⚠️ Mujhe admin banao (Post messages) taaki channel se seekh sakun.")
+            try:
+                tg_api.send_message(chat_id, "⚠️ Mujhe admin banao (Post messages) taaki channel posts padh sakun.")
+            except Exception:
+                pass
+        try:
+            tg_api.send_message(
+                config.OWNER_CHAT_ID,
+                f"✅ Channel auto-set!\n\nTitle: {title}\nID: `{chat_id}`\n"
+                f"Admin: {'yes' if is_admin else 'no — please add me as admin'}",
+            )
+        except Exception:
+            pass
 
 
 def handle_channel_post(post) -> None:
+    """Only ingest posts from the managed channel; ignore all others."""
+    chat_id = (post.get("chat") or {}).get("id")
+    if not links.is_managed_channel(chat_id):
+        return
     knowledge.ingest_channel_post(post)
 
 
@@ -185,6 +283,12 @@ def handle_message(msg) -> None:
         # forget-mode text (after panel button)
         if owner_panel.handle_forget_mode_text(msg):
             return
+        # group-fwd mode (after "Set by Forward" panel button)
+        if owner_panel.handle_group_fwd(msg):
+            return
+        # channel-fwd mode
+        if owner_panel.handle_channel_fwd(msg):
+            return
         # admin/owner reply to escalation
         if escalation.handle_admin_message(msg):
             return
@@ -204,7 +308,10 @@ def handle_message(msg) -> None:
 
     # ---------------- group chat ----------------
     if chat_type in ("group", "supergroup"):
-        # Learn from EVERY non-command non-bot message
+        # Only respond in the OWNER's managed group. Other groups = ignored.
+        if not links.is_managed_group(chat_id):
+            return
+        # Learn from every non-command non-bot message
         knowledge.ingest_message(msg)
 
         # Only respond to explicit asks or mentions
