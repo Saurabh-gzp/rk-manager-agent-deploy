@@ -241,7 +241,7 @@ def handle_callback(cb) -> bool:
         return True
 
     if action == "group_fwd":
-        save_state(f"{from_uid}:group_fwd_mode", True)
+        save_state(f"{from_uid}:group_fwd_mode", time.time())
         _edit(chat_id, message_id,
               "Set Group by Forward\n\n"
               "Apne target group se koi bhi message yahan DM me forward karo.\n"
@@ -297,7 +297,7 @@ def handle_callback(cb) -> bool:
         return True
 
     if action == "channel_fwd":
-        save_state(f"{from_uid}:channel_fwd_mode", True)
+        save_state(f"{from_uid}:channel_fwd_mode", time.time())
         _edit(chat_id, message_id,
               "Set Channel by Forward\n\n"
               "Apne target channel se koi bhi message yahan DM me forward karo.\n"
@@ -509,7 +509,7 @@ def handle_callback(cb) -> bool:
         return True
 
     if action == "mforget":
-        save_state(f"{from_uid}:forget_mode", True)
+        save_state(f"{from_uid}:forget_mode", time.time())
         _edit(chat_id, message_id, "🗑 Bhulane ke liye query DM me bhejo. (Cancel: /cancel)", reply_markup=_back())
         _answer(cb_id)
         return True
@@ -649,6 +649,31 @@ def get_db():
     return _g()
 
 
+# Input modes (forward-set, forget) auto-expire so the owner is never
+# trapped in one forever.
+MODE_TIMEOUT_S = 600
+
+
+def _mode_on(uid, name: str) -> bool:
+    """True if the owner entered the named mode recently.
+
+    Stale modes are cleared automatically (old boolean True values count
+    as expired).
+    """
+    key = f"{uid}:{name}"
+    ts = get_state(key)
+    if not ts:
+        return False
+    try:
+        age = time.time() - float(ts)
+    except (TypeError, ValueError):
+        age = 0.0
+    if age > MODE_TIMEOUT_S:
+        save_state(key, False)
+        return False
+    return True
+
+
 def handle_forget_mode_text(msg) -> bool:
     """If owner typed a forget query after clicking the button, consume it."""
     uid = (msg.get("from") or {}).get("id")
@@ -656,7 +681,7 @@ def handle_forget_mode_text(msg) -> bool:
     text = (msg.get("text") or "").strip()
     if not _is_owner(uid):
         return False
-    if not get_state(f"{uid}:forget_mode"):
+    if not _mode_on(uid, "forget_mode"):
         return False
     if text in ("/cancel", "/back"):
         save_state(f"{uid}:forget_mode", False)
@@ -674,7 +699,7 @@ def handle_group_fwd(msg) -> bool:
     chat_id = (msg.get("chat") or {}).get("id")
     if not _is_owner(uid):
         return False
-    if not get_state(f"{uid}:group_fwd_mode"):
+    if not _mode_on(uid, "group_fwd_mode"):
         return False
     if (msg.get("text") or "").strip() in ("/cancel", "/back"):
         save_state(f"{uid}:group_fwd_mode", False)
@@ -686,7 +711,8 @@ def handle_group_fwd(msg) -> bool:
     if not origin_id or origin_type not in ("group", "supergroup"):
         _send(chat_id,
               "Ye message group se forwarded nahi hai.\n"
-              "Target group se forward karo (kisi member ka msg ya apna msg).")
+              "Target group se forward karo (kisi member ka msg ya apna msg).\n\n"
+              "Mode se bahar nikalne ke liye /cancel bhejo.")
         return True
     if not _bot_is_member(int(origin_id), require_admin=False):
         _send(chat_id, "Pehle bot ko target group mein add karo, phir us group ka message forward karke set karo.")
@@ -712,7 +738,7 @@ def handle_channel_fwd(msg) -> bool:
     chat_id = (msg.get("chat") or {}).get("id")
     if not _is_owner(uid):
         return False
-    if not get_state(f"{uid}:channel_fwd_mode"):
+    if not _mode_on(uid, "channel_fwd_mode"):
         return False
     if (msg.get("text") or "").strip() in ("/cancel", "/back"):
         save_state(f"{uid}:channel_fwd_mode", False)
@@ -724,7 +750,8 @@ def handle_channel_fwd(msg) -> bool:
     if not origin_id or origin_type != "channel":
         _send(chat_id,
               "Ye message channel se forwarded nahi hai.\n"
-              "Target channel se forward karo.")
+              "Target channel se forward karo.\n\n"
+              "Mode se bahar nikalne ke liye /cancel bhejo.")
         return True
     if not _bot_is_member(int(origin_id), require_admin=True):
         _send(chat_id, "Channel read karne ke liye pehle bot ko channel admin banao (Post Messages permission OFF rakhna), phir forward karke set karo.")

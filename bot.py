@@ -394,6 +394,23 @@ def handle_message(msg) -> None:
             if text == "/start" or text.startswith("/start "):
                 owner_panel.handle_start(msg)
                 return
+        # /cancel: exit ANY pending input mode (forward-set, forget,
+        # escalation reply) so the owner is never trapped in a mode.
+        if is_owner and text in ("/cancel", "/back"):
+            cleared = []
+            for _k in ("group_fwd_mode", "channel_fwd_mode", "forget_mode"):
+                if db.get_state(f"{uid}:{_k}"):
+                    db.save_state(f"{uid}:{_k}", False)
+                    cleared.append(_k.replace("_mode", "").replace("_", " "))
+            if db.get_state(f"awaiting_reply:{uid}"):
+                db.save_state(f"awaiting_reply:{uid}", None)
+                cleared.append("reply mode")
+            tg_api.send_message(
+                chat_id,
+                "Cancelled ✅ — ab normal baat kar sakte ho."
+                if cleared else "Koi pending mode nahi tha 🙂",
+            )
+            return
         # /forget
         if is_owner and text.startswith("/forget"):
             if owner_panel.handle_forget_command(msg):

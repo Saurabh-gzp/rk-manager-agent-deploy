@@ -1,3 +1,4 @@
+import time
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,17 @@ def message(text, user_id=123):
         "text": text,
         "from": {"id": user_id, "first_name": "Sam", "username": "sam"},
         "chat": {"id": -100123, "type": "supergroup", "title": "Test"},
+        "entities": [],
+    }
+
+
+def private_message(text, user_id=123):
+    return {
+        "message_id": 7,
+        "date": 1000,
+        "text": text,
+        "from": {"id": user_id, "first_name": "Ox", "username": "ox"},
+        "chat": {"id": user_id, "type": "private"},
         "entities": [],
     }
 
@@ -98,8 +110,7 @@ class BotRoutingTests(unittest.TestCase):
         answer.assert_not_called()
         send.assert_not_called()
 
-    def test_gate_prompt_includes_recent_conversation(self):
-        # The reported case: bot asked "batao kya help chahiye", owner
+    def test_gate_prompt_includes_recent_conversation(self):        # The reported case: bot asked "batao kya help chahiye", owner
         # replied "me owner hu tum kya mujhe doge" — the gate must see the
         # follow-up in context.
         bot._GROUP_CONTEXT.clear()
@@ -133,6 +144,40 @@ class BotRoutingTests(unittest.TestCase):
             })
         ingest.assert_called_once()
         send.assert_not_called()
+
+    def test_cancel_clears_stuck_forward_mode(self):
+        store = {"123:group_fwd_mode": time.time()}
+        get = lambda k, d=None: store.get(k, d)  # noqa: E731
+        save = lambda k, v: store.__setitem__(k, v)  # noqa: E731
+        with patch.object(bot.config, "OWNER_CHAT_ID", 123), \
+                patch.object(bot.db, "get_state", side_effect=get), \
+                patch.object(bot.db, "save_state", side_effect=save), \
+                patch.object(bot.tg_api, "send_message") as send, \
+                patch.object(bot.tg_api, "send_chat_action"), \
+                patch.object(bot.agent, "answer") as answer:
+            bot.handle_message(private_message("/cancel"))
+        self.assertFalse(store["123:group_fwd_mode"])
+        self.assertIn("Cancelled", send.call_args.args[1])
+        answer.assert_not_called()
+
+    def test_expired_forward_mode_falls_through_to_chat(self):
+        store = {"123:group_fwd_mode": time.time() - 700}  # 11 min ago
+        get = lambda k, d=None: store.get(k, d)  # noqa: E731
+        save = lambda k, v: store.__setitem__(k, v)  # noqa: E731
+        with patch.object(bot.config, "OWNER_CHAT_ID", 123), \
+                patch.object(bot.db, "get_state", side_effect=get), \
+                patch.object(bot.db, "save_state", side_effect=save), \
+                patch.object(bot.tg_api, "send_message") as send, \
+                patch.object(bot.tg_api, "send_chat_action"), \
+                patch.object(bot.agent, "answer",
+                             return_value={"text": "Haan bolo!",
+                                            "grounded": True}) as answer, \
+                patch.object(bot.escalation, "handle_admin_message",
+                             return_value=False):
+            bot.handle_message(private_message("hy"))
+        self.assertFalse(store["123:group_fwd_mode"])  # stale mode cleared
+        answer.assert_called_once()
+        self.assertEqual(send.call_args.args[1], "Haan bolo!")
 
 
 if __name__ == "__main__":
