@@ -25,6 +25,7 @@ import knowledge
 import links
 import moderation
 import tg_api
+import rules
 
 
 def _is_owner(uid: int) -> bool:
@@ -111,7 +112,7 @@ def handle_owner_command(msg) -> bool:
     command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
     known = {
         "/mod_add", "/mod_remove", "/mod_list", "/mod_on", "/mod_off",
-        "/mute", "/status",
+        "/mute", "/status", "/yaad", "/rules", "/bhul",
     }
     if command not in known:
         return False
@@ -180,8 +181,39 @@ def handle_owner_command(msg) -> bool:
             f"Group ID: {links.get_group_id() or 'not set'}\n"
             f"Channel ID: {links.get_channel_id() or 'not set'}\n"
             f"Moderation: {'ON' if moderation.is_enabled() else 'OFF'} "
-            f"({len(moderation.get_terms())} terms)",
+            f"({len(moderation.get_terms())} terms)\n"
+            f"Standing rules: {len(rules.get_rules())}",
         )
+        return True
+    if command == "/yaad":
+        if not argument:
+            _send(chat_id, "Usage: /yaad <hamesha yaad rakhne wali baat>")
+            return True
+        idx = rules.add_rule(argument, uid)
+        if idx == -1:
+            _send(chat_id, "Ye rule pehle se noted hai.")
+        elif idx == 0:
+            _send(chat_id, "Rule invalid hai.")
+        else:
+            _send(chat_id, f"✅ Yaad rakh liya (rule #{idx}). Ab se hamesha follow karunga.")
+        return True
+    if command == "/rules":
+        all_rules = rules.get_rules()
+        if not all_rules:
+            _send(chat_id, "Koi standing rule noted nahi hai.")
+        else:
+            lines = ["📋 Standing rules:"]
+            lines.extend(f"{i}. {r['rule']}" for i, r in enumerate(all_rules, 1))
+            _send(chat_id, "\n".join(lines))
+        return True
+    if command == "/bhul":
+        try:
+            n = int(argument)
+        except ValueError:
+            _send(chat_id, "Usage: /bhul <rule number>")
+            return True
+        removed = rules.remove_rule(n)
+        _send(chat_id, f"🗑 Rule #{n} bhula diya: {removed}" if removed else f"Rule #{n} mila nahi.")
         return True
     return False
 
@@ -191,6 +223,60 @@ def _back():
 
 
 # ---------- callbacks ----------
+
+def _show_channel(chat_id: int, message_id: int, cb_id: str) -> None:
+    """Render the Channel Admin screen.
+
+    The channel is fully optional — if the owner skips it, the setup nag
+    disappears and the bot works group-only.
+    """
+    cid = links.get_channel_id()
+    title = get_state("channel_title") or "-"
+    if cid and get_state("channel_skipped", False):
+        save_state("channel_skipped", False)  # self-heal once a channel exists
+    skipped = bool(get_state("channel_skipped", False))
+    kb_buttons = [
+        [{"text": "Refresh", "callback_data": "p:channel"}],
+    ]
+    if not cid:
+        if skipped:
+            text = (
+                "Channel Admin\n\n"
+                "Channel skip kiya hua hai — bot sirf group me kaam karega, "
+                "ab channel setup nahi mangega. 👍"
+            )
+            kb_buttons.append(
+                [{"text": "↩️ Channel enable karo", "callback_data": "p:channel_unskip"}])
+        else:
+            text = (
+                "Channel Admin\n\n"
+                "Abhi koi channel set nahi. (Channel optional hai — sirf group bhi chalega.)\n\n"
+                "Setup ke 2 tarike:\n"
+                "1) Channel kholo > Administrators > Add > @rkgamermanagerbot search, Post messages permission de do\n"
+                "2) Set by Forward — kisi bhi channel se ek message yahan DM me forward karo, bot uska chat ID use karega"
+            )
+            kb_buttons.append(
+                [{"text": "Set by Forward", "callback_data": "p:channel_fwd"}])
+            kb_buttons.append(
+                [{"text": "🔕 Channel nahi chahiye", "callback_data": "p:channel_skip"}])
+    else:
+        text = (
+            f"Channel Admin\n\n"
+            f"Channel ID: {cid}\n"
+            f"Title: {title}\n"
+            f"Subscribers: {tg_api.get_chat_member_count(cid)}"
+        )
+        kb_buttons.append(
+            [{"text": "Set by Forward", "callback_data": "p:channel_fwd"}])
+        kb_buttons.append(
+            [{"text": "Clear", "callback_data": "p:channel_clear"}])
+        kb_buttons.append(
+            [{"text": "Leave channel", "callback_data": "p:channel_leave"}])
+    kb_buttons.append([{"text": "Back", "callback_data": "p:back"}])
+    _edit(chat_id, message_id, text,
+          reply_markup={"inline_keyboard": kb_buttons})
+    _answer(cb_id)
+
 
 def handle_callback(cb) -> bool:
     data = cb.get("data") or ""
@@ -268,32 +354,19 @@ def handle_callback(cb) -> bool:
         return True
 
     if action == "channel":
-        cid = links.get_channel_id()
-        title = get_state("channel_title") or "-"
-        kb = {"inline_keyboard": [
-            [{"text": "Refresh", "callback_data": "p:channel"}],
-            [{"text": "Set by Forward", "callback_data": "p:channel_fwd"}],
-            [{"text": "Clear", "callback_data": "p:channel_clear"}],
-            [{"text": "Leave channel", "callback_data": "p:channel_leave"}],
-            [{"text": "Back", "callback_data": "p:back"}],
-        ]}
-        if not cid:
-            text = (
-                "Channel Admin\n\n"
-                "Abhi koi channel set nahi.\n\n"
-                "Setup ke 2 tarike:\n"
-                "1) Channel kholo > Administrators > Add > @rkgamermanagerbot search, Post messages permission de do\n"
-                "2) Set by Forward — kisi bhi channel se ek message yahan DM me forward karo, bot uska chat ID use karega"
-            )
-        else:
-            text = (
-                f"Channel Admin\n\n"
-                f"Channel ID: {cid}\n"
-                f"Title: {title}\n"
-                f"Subscribers: {tg_api.get_chat_member_count(cid)}"
-            )
-        _edit(chat_id, message_id, text, reply_markup=kb)
+        _show_channel(chat_id, message_id, cb_id)
+        return True
+
+    if action == "channel_skip":
+        save_state("channel_skipped", True)
+        _answer(cb_id, "Channel skip kiya 👍")
+        _show_channel(chat_id, message_id, cb_id)
+        return True
+
+    if action == "channel_unskip":
+        save_state("channel_skipped", False)
         _answer(cb_id)
+        _show_channel(chat_id, message_id, cb_id)
         return True
 
     if action == "channel_fwd":

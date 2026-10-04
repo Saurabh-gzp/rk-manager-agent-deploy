@@ -41,6 +41,7 @@ import owner_panel  # noqa: E402
 import links  # noqa: E402
 import moderation  # noqa: E402
 import triggers  # noqa: E402
+import rules  # noqa: E402
 
 
 def log(*args):
@@ -264,6 +265,67 @@ def _synthesize_owner_command(text: str, msg: dict, chat_id: int) -> dict | None
     if target_token:
         synth["text"] += f" {target_token}"
     return synth
+
+
+def _handle_rule_command(msg: dict, uid: int, chat_id: int, text: str) -> bool:
+    """Owner's standing instructions: /yaad <rule>, /rules, /bhul <n>.
+
+    True = handled. Rules live in rules.py and are injected into every
+    AI prompt, so they can never be buried by ordinary knowledge.
+    """
+    parts = (text or "").split(maxsplit=1)
+    cmd = parts[0].split("@", 1)[0].lower()
+    if cmd not in ("/yaad", "/rules", "/bhul"):
+        return False
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    is_owner = uid == config.OWNER_CHAT_ID
+    is_admin = is_owner or (config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID)
+
+    if cmd == "/yaad":
+        if not is_owner:
+            tg_api.send_message(chat_id, "Ye sirf owner kar sakta hai.")
+            return True
+        if not arg:
+            tg_api.send_message(chat_id, "Usage: /yaad <hamesha yaad rakhne wali baat>")
+            return True
+        idx = rules.add_rule(arg, uid)
+        if idx == -1:
+            tg_api.send_message(chat_id, "Ye rule pehle se noted hai.")
+        elif idx == 0:
+            tg_api.send_message(chat_id, "Rule invalid hai.")
+        else:
+            tg_api.send_message(
+                chat_id, f"✅ Yaad rakh liya (rule #{idx}). Ab se hamesha follow karunga.")
+        return True
+
+    if cmd == "/rules":
+        if not is_admin:
+            tg_api.send_message(chat_id, "Ye sirf owner/admin dekh sakte hain.")
+            return True
+        all_rules = rules.get_rules()
+        if not all_rules:
+            tg_api.send_message(chat_id, "Koi standing rule noted nahi hai.")
+        else:
+            lines = ["📋 Standing rules (owner):"]
+            lines.extend(f"{i}. {r['rule']}" for i, r in enumerate(all_rules, 1))
+            tg_api.send_message(chat_id, "\n".join(lines))
+        return True
+
+    # /bhul
+    if not is_owner:
+        tg_api.send_message(chat_id, "Ye sirf owner kar sakta hai.")
+        return True
+    try:
+        n = int(arg)
+    except ValueError:
+        tg_api.send_message(chat_id, "Usage: /bhul <rule number>  (number /rules me dikhta hai)")
+        return True
+    removed = rules.remove_rule(n)
+    if removed:
+        tg_api.send_message(chat_id, f"🗑 Rule #{n} bhula diya: {removed}")
+    else:
+        tg_api.send_message(chat_id, f"Rule #{n} mila nahi.")
+    return True
 
 
 def _remember(chat_id: int, name: str, text: str,
@@ -656,6 +718,10 @@ def handle_message(msg) -> None:
         # /ban /unban /delete. Handled before the reply gate so commands
         # are never swallowed as chatter.
         if moderation.handle_mod_command(msg, uid, chat_id):
+            return
+
+        # Standing-rule commands: /yaad (owner), /rules, /bhul (owner).
+        if _handle_rule_command(msg, uid, chat_id, text):
             return
 
         # The bot reads EVERY message, but replies only when spoken to or

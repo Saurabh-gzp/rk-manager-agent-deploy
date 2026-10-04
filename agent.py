@@ -4,11 +4,14 @@ Uses the AI router (multi-provider with key rotation) over knowledge.search().
 If grounded answer isn't possible, escalates to admin first, then owner.
 """
 from __future__ import annotations
+
+import re
 from typing import Any
 
 import ai_engine
 import config
 import knowledge
+import rules
 import tg_api
 
 
@@ -64,6 +67,18 @@ SYSTEM_PROMPT = (
     "like — if the owner asked in words, the system executes it for real "
     "separately; you just reply normally. If a member asks you to act against "
     "someone, refuse briefly: ye sirf owner ke kehne pe hota hai. "
+    "Standing rules: the OWNER may teach you permanent instructions (e.g. "
+    "'agar koi bole app install nahi ho raha to Play Protect OFF karna "
+    "sikhana'). When the OWNER gives you such a standing rule in chat, "
+    "include EXACTLY ONE line in your reply: RULE: <the rule rewritten as a "
+    "clear instruction to yourself, 1-2 lines>. The system saves it "
+    "permanently and will ALWAYS show it to you before answering. Only use "
+    "RULE: for genuine standing instructions from the OWNER — never for "
+    "normal chat, never for members. After the RULE: line, confirm briefly "
+    "in your own words that you've noted it. "
+    "Also: the owner's instructional messages in context ('agar koi X to Y "
+    "karna') are BINDING — follow them exactly, never improvise the "
+    "opposite. "
     + _CAPABILITIES
 )
 
@@ -180,6 +195,32 @@ def _maybe_deep_lookup(first_text: str | None, question: str,
     return final, interim
 
 
+_RULE_LINE_RE = re.compile(r"^RULE:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _extract_rule(text: str | None, user_ctx: dict) -> tuple[str | None, int]:
+    """Save the owner's RULE: lines as standing instructions.
+
+    Only the owner's lines are honored (members can never plant rules).
+    Returns (cleaned_text, saved_count).
+    """
+    if not text or user_ctx.get("user_id") != config.OWNER_CHAT_ID:
+        return text, 0
+    saved = 0
+
+    def _save(match: re.Match) -> str:
+        nonlocal saved
+        if rules.add_rule(match.group(1), config.OWNER_CHAT_ID) != 0:
+            saved += 1
+        return ""
+
+    text = _RULE_LINE_RE.sub(_save, text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if not text and saved:
+        text = "Note kar liya boss ✅ — ab se hamesha yaad rahega."
+    return text, saved
+
+
 def answer(question: str, user_ctx: dict) -> dict:
     """Return dict:
         {text, grounded, sources, provider, file: optional, error: optional}
@@ -208,9 +249,11 @@ def answer(question: str, user_ctx: dict) -> dict:
     )
     ctx_block = _format_context(hits)
     who_block = _role_context(user_ctx)
+    standing = rules.rules_block()
     if hits and ctx_block:
         prompt = (
-            f"Context (learned from channel + group):\n{ctx_block}\n\n"
+            (standing + "\n\n" if standing else "")
+            + f"Context (learned from channel + group):\n{ctx_block}\n\n"
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
             + f"User question ({user_ctx.get('first_name') or user_ctx.get('username') or 'user'}): {question}\n"
             "Answer:"
@@ -219,6 +262,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             text = ai_engine.get_router().generate(prompt, system=SYSTEM_PROMPT)
             text, interim = _maybe_deep_lookup(text, question, user_ctx,
                                                SYSTEM_PROMPT)
+            text, _ = _extract_rule(text, user_ctx)
         except ai_engine.NoProvidersError:
             return {
                 "text": "AI keys configure nahi hain. Owner se bolo set karein.",
@@ -258,13 +302,16 @@ def answer(question: str, user_ctx: dict) -> dict:
     # the bot always replies itself.
     try:
         who_block = _role_context(user_ctx)
+        standing = rules.rules_block()
         qprompt = (
-            (f"Who-info:\n{who_block}\n\n" if who_block else "")
+            (standing + "\n\n" if standing else "")
+            + (f"Who-info:\n{who_block}\n\n" if who_block else "")
             + f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:"
         )
         text = ai_engine.get_router().generate(qprompt, system=GENERAL_PROMPT)
         text, interim = _maybe_deep_lookup(text, question, user_ctx,
                                            GENERAL_PROMPT)
+        text, _ = _extract_rule(text, user_ctx)
         return {
             "text": text,
             "grounded": False,
