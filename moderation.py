@@ -250,13 +250,22 @@ def handle_group_message(msg: dict) -> bool:
     ):
         return False
 
+    # SPEED: saare cheap regex checks PEHLE karo — getChatMember API call
+    # (100-300ms network) sirf tab karo jab kuch match ho. Normal messages
+    # par zero Telegram API calls lagti hain.
+    term = matches_term(text)
+    promo = None if term else find_external_promo(
+        text, msg.get("entities") or msg.get("caption_entities"))
+    filt = None if (term or promo) else matches_filter(text)
+    if not term and not promo and not filt:
+        return False  # koi match nahi — zero API calls, fast path
+
     # Do not moderate or mute group admins; fail open if Telegram cannot
     # establish the member's current role.
     member = tg_api.get_chat_member(chat_id, user_id)
     if member.get("status") in ("administrator", "creator") or not member.get("status"):
         return False
 
-    term = matches_term(text)
     if term:
         count = _strike("moderation_strike", chat_id, user_id)
         name = (user.get("first_name") or user.get("username") or "Member").strip()
@@ -287,7 +296,6 @@ def handle_group_message(msg: dict) -> bool:
 
     # External channel/group promotion: delete + warn, repeat -> mute.
     # The linked channel is allowlisted; owner/admins/bots are never touched.
-    promo = find_external_promo(text, msg.get("entities") or msg.get("caption_entities"))
     if promo:
         count = _strike("promo_strike", chat_id, user_id)
         name = (user.get("first_name") or user.get("username") or "Member").strip()
@@ -325,7 +333,7 @@ def handle_group_message(msg: dict) -> bool:
 
     # Owner-configured filters (Rose-style). Same guards as above apply:
     # owner/admins/commands/bots are never touched here.
-    filt = matches_filter(text)
+    # ('filt' pehle hi computed hai — fast path me None tha.)
     if filt:
         word, entry = filt
         name = (user.get("first_name") or user.get("username") or "Member").strip()

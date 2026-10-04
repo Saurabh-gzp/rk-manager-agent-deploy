@@ -64,5 +64,7 @@ MESSAGE_TTL_DAYS = _int("MESSAGE_TTL_DAYS", 60)
 POST_TTL_DAYS = _int("POST_TTL_DAYS", 120)
 FILE_POST_TTL_DAYS = _int("FILE_POST_TTL_DAYS", 240)
 KEY_BACKOFF_SECONDS = _int("KEY_BACKOFF_SECONDS", 600)
-AI_REQUEST_TIMEOUT = _int("AI_REQUEST_TIMEOUT", 45)
-USER_MEMORY_IDLE_DAYS = max(1, _int("USER_MEMORY_IDLE_DAYS", 180))
+AI_REQUEST_TIMEOUT = _int("AI_REQUEST_TIMEOUT", 25)
+# User ki request: 1 hafta se zyada idle user ki memory delete hone se
+# pehle owner ko ek baar DM notice zaroor jata hai.
+USER_MEMORY_IDLE_DAYS = max(1, _int("USER_MEMORY_IDLE_DAYS", 7))

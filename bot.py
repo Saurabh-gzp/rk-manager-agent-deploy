@@ -84,6 +84,12 @@ def _mentions_bot(text: str, entities: list) -> bool:
             chunk = (text or "")[s:s + ln].lstrip("@").lower()
             if chunk == uname.lower():
                 return True
+    # Cheap name-detection: 'manager', 'rk manager', 'agent', 'bot' —
+    # LLM gate call skip hota hai (ek pura roundtrip bachta hai).
+    low = (text or "").lower()
+    for name in ("rk manager", "rkmanager", "manager", "agent", "bot"):
+        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", low):
+            return True
     return False
 
 
@@ -1060,6 +1066,38 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
 
 # ---------------- run modes ----------------
 
+
+def _dispatch_update_async(u) -> None:
+    """Run update handling in a background thread.
+
+    Webhook mode: Telegram ko turant 200 milta hai, processing background
+    me hoti hai — user ko faster perceived response + Telegram retries nahi.
+    """
+    import threading
+    t = threading.Thread(target=_dispatch_update, args=(u,), daemon=True)
+    t.start()
+
+
+def _keepalive_loop(url: str) -> None:
+    """Self-ping every 10 min — Render free tier me service sleep (cold
+    start 10-20s) hone nahi deta, isliye bot ka reply turant aata hai.
+    """
+    import threading
+    import urllib.request
+
+    def _loop():
+        while True:
+            time.sleep(600)  # 10 min
+            try:
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    resp.read()
+            except Exception:
+                pass
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
 def run_polling() -> None:
     try:
         tg_api.delete_webhook()
@@ -1159,9 +1197,12 @@ def run_webhook() -> None:
             except ValueError:
                 ln = 0
             body = self.rfile.read(ln) if ln else b""
+            # Telegram ko TURANT 200 do; update background me process karo.
+            # Isse webhook kabhi slow/timeout nahi hota, aur user ka answer
+            # jitna fast ho sakta tha utna fast banta hai.
             try:
                 u = json.loads(body.decode("utf-8"))
-                _dispatch_update(u)
+                _dispatch_update_async(u)
             except Exception:
                 log("webhook update failed:", traceback.format_exc())
             self.send_response(200)
@@ -1171,6 +1212,10 @@ def run_webhook() -> None:
             pass
 
     log(f"webhook mode on port {config.PORT} (secret path configured)")
+    # Render free tier cold-start fix: khud ko har 10 min ping karo.
+    if config.WEBHOOK_URL:
+        _keepalive_loop(config.WEBHOOK_URL + "/healthz")
+        log("keep-alive self-ping enabled (10 min interval)")
     HTTPServer(("0.0.0.0", config.PORT), H).serve_forever()
 
 

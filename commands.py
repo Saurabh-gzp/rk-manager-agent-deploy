@@ -12,6 +12,7 @@ from db import get_db
 from moderation import _say_reply
 
 _PUBLIC_COMMANDS = {"help", "id", "stats", "files", "report"}
+_OWNER_COMMANDS = {"users"}
 
 BOT_COMMANDS_PUBLIC = [
     {"command": "ask", "description": "Bot se kuch bhi pucho"},
@@ -43,6 +44,7 @@ BOT_COMMANDS_OWNER = [
     {"command": "kick", "description": "Member ko group se nikalo"},
     {"command": "ban", "description": "Ban karo (owner only)"},
     {"command": "unban", "description": "Unban karo (owner only)"},
+    {"command": "users", "description": "Users list — kaun kitna active"},
     {"command": "sikhao", "description": "Bot ko task sikhao (owner)"},
     {"command": "sikhai", "description": "Sikhaye hue tasks dekho"},
     {"command": "bhulo", "description": "Sikhaya task bhulo (owner)"},
@@ -73,6 +75,7 @@ HELP_TEXT = (
     "• /modlog — action history\n\n"
     "👑 <b>Owner only:</b>\n"
     "• /kick /ban /unban\n"
+    "• /users — kaun kitna active hai (users list)\n"
     "• /sikhao — bot ko naya task sikhao\n"
     "• /yaad — hamesha yaad rakhne wali baat\n\n"
     "💬 Bot ko seedha bhi bolo — @mention ya reply karke.\n"
@@ -97,11 +100,21 @@ def handle_public_command(msg: dict, uid: int, chat_id: int) -> bool:
         return False
     parts = text.split()
     cmd = parts[0].split("@", 1)[0].lower().lstrip("/")
-    if cmd not in _PUBLIC_COMMANDS:
+    if cmd not in _PUBLIC_COMMANDS and cmd not in _OWNER_COMMANDS:
         return False
     args = " ".join(parts[1:]).strip()
     mid = msg.get("message_id")
     issuer = msg.get("from") or {}
+
+    # ---- /users (owner only) — users list with activity ----
+    if cmd == "users":
+        if not (uid == config.OWNER_CHAT_ID
+                or (config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID)):
+            _say_reply(chat_id, "❌ Ye sirf owner dekh sakta hai.", mid)
+            return True
+        lines = list_users()
+        _say_reply(chat_id, "\n".join(lines), mid)
+        return True
 
     # ---- /help ----
     if cmd == "help":
@@ -214,6 +227,56 @@ def handle_public_command(msg: dict, uid: int, chat_id: int) -> bool:
         return True
 
     return False
+
+
+def list_users() -> list[str]:
+    """Owner ke liye users list: naam, username, msg count, last-seen."""
+    import time as _time
+
+    try:
+        docs = list(get_db()["messages"].find({}))
+    except Exception:
+        docs = []
+    users: dict[int, dict] = {}
+    for d in docs:
+        uid = d.get("user_id")
+        if uid is None:
+            continue
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            continue
+        row = users.setdefault(uid, {
+            "name": d.get("first_name") or "",
+            "username": d.get("username") or "",
+            "n": 0, "last": 0.0,
+        })
+        row["n"] += 1
+        row["last"] = max(row["last"], float(d.get("date") or 0))
+        if not row["name"]:
+            row["name"] = d.get("first_name") or ""
+        if not row["username"]:
+            row["username"] = d.get("username") or ""
+    if not users:
+        return ["👥 Abhi koi user memory me nahi hai."]
+    now = _time.time()
+    rows = sorted(users.items(), key=lambda kv: kv[1]["last"] or 0,
+                  reverse=True)
+    lines = [f"👥 Users list — {len(rows)} log yaad hain "
+             "(memory active):"]
+    for uid, row in rows[:20]:
+        name = row["name"] or ("@" + row["username"] if row["username"]
+                               else f"user {uid}")
+        uname = f" (@{row['username']})" if row["username"] else ""
+        days = int((now - (row["last"] or now)) / 86400)
+        when = ("abhi active" if days == 0
+                else f"{days} din pehle")
+        lines.append(f"• {name}{uname} — {row['n']} msgs, {when}")
+    if len(rows) > 20:
+        lines.append(f"…aur {len(rows) - 20} log.")
+    lines.append("\n7+ din se inactive user ki memory auto-delete hoti "
+                 "hai (owner ko notice jata hai).")
+    return lines
 
 
 def list_channel_files(query: str | None = None) -> list[dict]:

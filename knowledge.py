@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 import config
+import tg_api
 from db import get_db, get_state, save_state
 
 
@@ -280,11 +281,34 @@ def prune_once() -> dict:
     for user_id, last_ts in last_activity.items():
         if now - last_ts <= idle_limit:
             continue
-        counts["messages"] += db["messages"].count_documents({"user_id": user_id})
+        # User ki identity (naam) delete hone se pehle nikaal lo — notice me
+        # likhna hai.
+        sample = db["messages"].find_one({"user_id": user_id}) or {}
+        u_name = (sample.get("first_name") or sample.get("username")
+                  or f"user {user_id}")
+        u_msgs = db["messages"].count_documents({"user_id": user_id})
+        u_qa = db["qa"].count_documents({"user_id": user_id})
         db["messages"].delete_many({"user_id": user_id})
-        counts["qa_old"] += db["qa"].count_documents({"user_id": user_id})
         db["qa"].delete_many({"user_id": user_id})
+        counts["messages"] += u_msgs
+        counts["qa_old"] += u_qa
         counts["inactive_users"] += 1
+        # OWNER KO NOTICE (user ki marzi): memory delete hone se pehle ek
+        # baar DM zaroor jata hai — silent deletion kabhi nahi.
+        try:
+            idle_days = int((now - last_ts) / 86400)
+            tg_api.send_message(
+                config.OWNER_CHAT_ID,
+                "🧹 Memory cleanup\n\n"
+                f"{u_name} (user_id: {user_id}) se {idle_days} din se koi "
+                f"baat nahi hui, isliye uski purani yaadein delete kar raha "
+                f"hu — {u_msgs} messages, {u_qa} Q&A.\n\n"
+                "Wo wapas aaya to main uski nayi baatein phir se seekh "
+                "lunga. Chahte ho to /users se dekh sakte ho kaun active "
+                "hai.",
+            )
+        except Exception:
+            pass
     # posts
     for d in db["channel_posts"].find():
         if _is_stale_post(d, now):

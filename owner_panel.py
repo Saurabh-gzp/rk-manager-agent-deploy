@@ -112,7 +112,7 @@ def handle_owner_command(msg) -> bool:
     command = text.split(maxsplit=1)[0].split("@", 1)[0].casefold()
     known = {
         "/mod_add", "/mod_remove", "/mod_list", "/mod_on", "/mod_off",
-        "/mute", "/status", "/yaad", "/rules", "/bhul",
+        "/mute", "/status", "/yaad", "/rules", "/bhul", "/users",
     }
     if command not in known:
         return False
@@ -171,6 +171,11 @@ def handle_owner_command(msg) -> bool:
             _send(chat_id, f"⏱ User {target_id} ko {minutes} minute mute kiya. Ban nahi kiya.")
         else:
             _send(chat_id, f"Mute apply nahi hua: {result.get('description', 'Telegram API error')}")
+        return True
+    if command == "/users":
+        import commands as _commands
+        lines = _commands.list_users()
+        _send(chat_id, "\n".join(lines))
         return True
     if command == "/status":
         from db import is_persistent
@@ -425,11 +430,28 @@ def handle_callback(cb) -> bool:
         return True
 
     if action == "addchannel":
+        me = tg_api.get_me() or {}
+        uname = me.get("username") or "rkgamermanagerbot"
         kb = {"inline_keyboard": [
-            [{"text": "➕ Bot ko channel me add karo", "url": _addchannel_url()}],
+            [{"text": "👤 Bot ki profile kholo (@{})".format(uname),
+              "url": f"https://t.me/{uname}"}],
             [{"text": "⬅️ Back", "callback_data": "p:back"}],
         ]}
-        _edit(chat_id, message_id, "➕ Add to channel\n\nClick karke channel select karo. Bot admin banake wapas /start bhejo.", reply_markup=kb)
+        text = (
+            "➕ Add to channel\n\n"
+            "⚠️ Telegram channels me bots ko LINK se add NAHI kar sakte — "
+            "ye Telegram ki limit hai (groups me hota hai, channels me nahi).\n\n"
+            "Isliye manually add karo (2 minute ka kaam):\n\n"
+            "1️⃣ Apna channel kholo\n"
+            "2️⃣ Channel ka naam → ✏️ Edit / Settings\n"
+            "3️⃣ Administrators → Add Admin\n"
+            "4️⃣ Search me likho: @{}\n"
+            "5️⃣ Add karo — sirf ek permission chahiye:\n"
+            "    • Post Messages ✅ (baaki sab OFF rakh sakte ho)\n\n"
+            "✅ Add hone par bot khud channel ko auto-set kar dega aur "
+            "tumhe DM me confirm karega.".format(uname)
+        )
+        _edit(chat_id, message_id, text, reply_markup=kb)
         _answer(cb_id)
         return True
 
