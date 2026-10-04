@@ -15,8 +15,22 @@ import tg_api
 
 
 DEFAULT_TERMS = [
-    "madarchod", "behenchod", "chutiya", "gandu", "bkl", "bc", "mc",
-    "fuck", "shit", "bitch", "asshole",
+    # -- Hindi abuses (with common spelling variants) --
+    "madarchod", "madharchod", "maderchod", "madar chod",
+    "behenchod", "behnchod", "bhenchod",
+    "chutiya", "chutiye", "chut", "choot",
+    "gandu", "gand", "gaand",
+    "bkl", "bc", "mc",
+    "sala", "saala", "sale",
+    "kutta", "kutti", "kutto",
+    "harami", "haramkhor", "haramzada",
+    "kamina", "kamine", "kameena",
+    "bhadwa", "bhadwe",
+    "randi", "randa", "chinal",
+    "loda", "lodu", "lund",
+    # -- English abuses --
+    "fuck", "fucking", "fucker", "shit", "bitch", "asshole", "bastard",
+    "dick", "pussy",
 ]
 STRIKE_WINDOW_SECONDS = 24 * 60 * 60
 MUTE_MINUTES = 10
