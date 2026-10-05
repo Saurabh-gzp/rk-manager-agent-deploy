@@ -11,6 +11,7 @@ Used by every other module. Collections:
 from __future__ import annotations
 import re
 import sys
+import time
 import uuid
 from typing import Any, Optional
 
@@ -44,6 +45,10 @@ def _match_doc(doc: dict, flt: Optional[dict]) -> bool:
     if not flt:
         return True
     for k, c in flt.items():
+        if k == "$or":
+            if not any(_match_doc(doc, sub) for sub in (c or [])):
+                return False
+            continue
         if isinstance(c, dict):
             if "$exists" in c and (k in doc) != bool(c["$exists"]):
                 return False
@@ -186,13 +191,51 @@ def _ensure_indexes(db) -> None:
 
 # ---------- state (k/v) ----------
 
+# SPEED: state values are tiny k/v docs (filters list, terms, rules, ids)
+# that are read on EVERY message but change rarely. Atlas M0 free tier
+# charges ~100-150ms per find_one — 6 reads/message = ~0.8s of pure
+# roundtrips. This in-process write-through cache removes them from the
+# hot path. Entries are keyed to the underlying db OBJECT, so swapping
+# the store (tests patch db._DB with a fresh IMDB) invalidates instantly.
+_STATE_CACHE: dict[str, tuple[Any, float, Any]] = {}
+_STATE_TTL = 20.0  # seconds; write-through invalidation makes it exact
+_MISS = object()  # sentinel: distinguishes "cached None" from "no entry"
+
+
+def _cache_get(k: str):
+    """Cached value, or _MISS. Drops entries whose db object was swapped."""
+    hit = _STATE_CACHE.get(k)
+    if hit is None:
+        return _MISS
+    v, ts, dbobj = hit
+    if dbobj is not _DB or _DB is None:
+        _STATE_CACHE.pop(k, None)
+        return _MISS
+    if time.time() - ts >= _STATE_TTL:
+        return _MISS
+    return v
+
+
 def save_state(k: str, v: Any) -> None:
-    get_db()["state"].update_one({"k": k}, {"$set": {"v": v}}, upsert=True)
+    cur = get_db()
+    cur["state"].update_one({"k": k}, {"$set": {"v": v}}, upsert=True)
+    _STATE_CACHE[k] = (v, time.time(), cur)
 
 
 def get_state(k: str, default: Any = None) -> Any:
-    doc = get_db()["state"].find_one({"k": k})
-    return doc["v"] if doc is not None else default
+    v = _cache_get(k)
+    if v is not _MISS:
+        return v if v is not None else default
+    cur = get_db()
+    doc = cur["state"].find_one({"k": k})
+    v = doc["v"] if doc is not None else None
+    _STATE_CACHE[k] = (v, time.time(), cur)
+    return v if v is not None else default
+
+
+def invalidate_state_cache() -> None:
+    """Drop the in-memory state cache (tests / manual refresh)."""
+    _STATE_CACHE.clear()
 
 
 # ---------- chat-type resolution ----------

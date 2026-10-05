@@ -44,6 +44,8 @@ import triggers  # noqa: E402
 import rules  # noqa: E402
 import commands  # noqa: E402
 import teach  # noqa: E402
+import channel_forward  # noqa: E402
+import community  # noqa: E402
 
 
 def log(*args):
@@ -604,6 +606,10 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
     messages), so follow-ups like "tum kya mujhe doge" after the bot asked
     "batao kya help chahiye" are recognised as addressed to the bot.
     Fail-closed: on any error, stay silent.
+
+    SPEED: hard timeout GATE_TIMEOUT_SECONDS (default 10s, less than the
+    25s AI timeout) — a stuck gate must never hold back the pipeline for
+    the full request budget. One-word YES/NO needs a fraction of that.
     """
     recent = list(_GROUP_CONTEXT.get(chat_id, []))
     # The current message was just remembered — exclude it from context.
@@ -635,11 +641,40 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
     )
     try:
         out = ai_engine.get_router().generate(
-            prompt, system=_GATE_SYSTEM, max_tokens=8
+            prompt, system=_GATE_SYSTEM, max_tokens=8,
+            timeout=config.GATE_TIMEOUT_SECONDS,
         )
     except Exception:
         return False
     return out.strip().upper().startswith("YES")
+
+
+def _start_answer_prefetch(question: str, uid: int | None):
+    """SPEED: run the answer's DB work (knowledge search + rules + facts)
+    in a daemon thread WHILE the reply-gate LLM call is in flight. The box
+    is handed to agent.answer(ctx['prefetch']) — the search latency hides
+    completely behind the gate roundtrip instead of stacking after it.
+    """
+    import threading
+    box: dict = {}
+
+    def _work():
+        try:
+            box["hits"] = knowledge.search(question, limit=10, user_id=uid)
+        except Exception:
+            box["hits"] = None
+        try:
+            box["standing"] = rules.rules_block()
+        except Exception:
+            box["standing"] = None
+        try:
+            box["facts"] = community.community_block()
+        except Exception:
+            box["facts"] = None
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    return box
 
 
 
@@ -648,9 +683,17 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
 def handle_my_chat_member(update) -> None:
     """Strict: only owner can activate the bot in a chat.
 
-    If anyone else adds the bot to a group/channel, the bot says
-    'join @rkgamersbgmi' and leaves immediately. If the owner adds it,
-    the chat is auto-set as the managed one and owner is notified in DM.
+    Three cases, handled honestly:
+    1. TELEGRAM SYSTEM auto-add (adder == the bot itself) — happens when
+       the bot becomes admin of a channel and Telegram auto-adds it to the
+       linked discussion group. NOT a stranger: stay quietly, never post
+       the 'join @...' refuse message, never leave, never announce a
+       'leave' that never happened (the old lie).
+    2. A REAL stranger adds the bot — refuse + leave + report to owner
+       (only claiming 'leave kar diya' when the API confirms it).
+    3. The OWNER adds it — auto-set as managed group/channel. For channels
+       the username/description is fetched immediately so the AI always
+       knows the channel's identity and its owner handle.
     """
     cm = update.get("my_chat_member") or {}
     chat = cm.get("chat") or {}
@@ -703,7 +746,36 @@ def handle_my_chat_member(update) -> None:
             pass
         return
 
-    # NON-OWNER added: refuse + leave
+    bot_id = _bot_id()
+
+    # ---- CASE 1: Telegram system auto-add (adder is the bot itself) ----
+    # Jab bot channel ka admin banta hai, Telegram uske linked discussion
+    # group me bot ko KHUD add kar deta hai — adder 'from' bot ka apna ID
+    # hota hai. Ye stranger add NAHI hai: quietly raho, kuch post mat karo,
+    # leave mat karo (warna channel ka discussion access chhoot jata hai).
+    if bot_id and adder_id == bot_id:
+        linked = ""
+        try:
+            if links.get_channel_id():
+                info = tg_api.get_chat(links.get_channel_id()) or {}
+                if info.get("linked_chat_id") == chat_id:
+                    linked = (" (ye linked channel ka discussion group hai — "
+                              "isliye yahin rahunga)")
+        except Exception:
+            pass
+        log(f"system auto-add to {chat_type} {chat_id} — staying" + linked)
+        try:
+            tg_api.send_message(
+                config.OWNER_CHAT_ID,
+                f"ℹ️ Telegram ne mujhe apne aap `{title}` me add kiya"
+                f"{linked or ' (system add)'} — main ruk gaya, wahan kuch "
+                "post nahi karunga.",
+            )
+        except Exception:
+            pass
+        return
+
+    # ---- CASE 2: a real stranger added the bot ----
     if adder_id != config.OWNER_CHAT_ID:
         join_msg = (
             "🙏 Yeh bot RK Manager Agent hai.\n\n"
@@ -718,26 +790,30 @@ def handle_my_chat_member(update) -> None:
                 tg_api.send_message(chat_id, join_msg)
             except Exception:
                 pass
-        try:
-            tg_api.leave_chat(chat_id)
-        except Exception:
-            pass
-        # log + notify owner
+        left = tg_api.leave_chat(chat_id)
+        # log + notify owner — only claim the leave when it really happened.
         log(f"refused non-owner add to {chat_type} {chat_id} by {adder_id}")
+        if left.get("ok"):
+            outcome = ("Maine bina channel par post kiye reject karke leave "
+                       "kar diya.")
+        else:
+            outcome = ("Leave nahi ho paya — owner manually remove kar de. "
+                       f"({left.get('description') or 'unknown error'})")
         try:
             tg_api.send_message(
                 config.OWNER_CHAT_ID,
                 f"⚠️ Kisi ne ({adder_id}) bot ko apne {chat_type} me add kiya: "
-                f"{title}. Maine bina channel par post kiye reject karke leave kar diya.",
+                f"{title}. {outcome}",
             )
         except Exception:
             pass
         return
 
-    # OWNER added: auto-set as managed chat
+    # ---- CASE 3: OWNER added — auto-set as managed chat ----
     if chat_type in ("group", "supergroup"):
         prev = links.get_group_id()
         links.set_group(chat_id, title)
+        community.refresh_now()
         if prev and prev != chat_id:
             try:
                 tg_api.leave_chat(prev)
@@ -763,19 +839,44 @@ def handle_my_chat_member(update) -> None:
     elif chat_type == "channel":
         prev = links.get_channel_id()
         links.set_channel(chat_id, title)
+        community.refresh_now()
         if prev and prev != chat_id:
             try:
                 tg_api.leave_chat(prev)
             except Exception:
                 pass
         is_admin = status in ("administrator", "creator")
+        # Fetch + cache the channel's identity right now: username (public
+        # link) and description (often carries 'Owner: @handle') — this is
+        # what lets the AI answer 'channel ka owner kaun hai' truthfully.
+        username = ""
+        desc_note = ""
+        try:
+            info = tg_api.get_chat(chat_id) or {}
+            username = (info.get("username") or "").strip()
+            if username:
+                db.save_state("managed_channel_username", username)
+            desc = (info.get("description") or "").strip()
+            owner_handle = community.extract_channel_owner(desc)
+            if owner_handle:
+                db.save_state("channel_owner_handle", owner_handle)
+                desc_note = f"\nChannel owner (description se): {owner_handle}"
+            linked_group = info.get("linked_chat_id")
+            if linked_group:
+                desc_note += f"\nLinked discussion group: `{linked_group}`"
+        except Exception:
+            pass
+        link_line = f"https://t.me/{username}" if username else "(private channel — invite link se hi khulega)"
         try:
             tg_api.send_message(
                 config.OWNER_CHAT_ID,
                 f"✅ Channel auto-set!\n\nTitle: {title}\nID: `{chat_id}`\n"
+                f"Link: {link_line}{desc_note}\n"
                 f"Read access: {'yes' if is_admin else 'not yet'}\n\n"
-                "Channel mein main koi message/post nahi bhejunga. Naye posts padhne ke liye "
-                "bot ko admin rakhna hoga; Post Messages permission OFF rakh sakte ho.",
+                "Channel me main kabhi khud se post NAHI karunga — sirf "
+                "tumhare /post command par. Members channel ka content "
+                "maange to (link/number se) main forward kar dunga. "
+                "Post Messages permission OFF hi rakh sakte ho.",
             )
         except Exception:
             pass
@@ -958,6 +1059,7 @@ def handle_message(msg) -> None:
         replied_to_bot = bool(reply_user and reply_user == _bot_id())
         entities = msg.get("entities") or msg.get("caption_entities") or []
         directed = is_ask or is_mention or replied_to_bot
+        prefetch_box: dict | None = None
 
         if not directed:
             # Commands (other than /ask, /admin handled above): ignore.
@@ -974,12 +1076,18 @@ def handle_message(msg) -> None:
                 # Plain chatter ("hyy", "ok"): never needs a reply.
                 if triggers.is_plain_chatter(text):
                     return
+                # SPEED: answer-context (search/rules/facts) builds in a
+                # daemon thread WHILE the gate LLM call runs — if the gate
+                # says YES the answer starts instantly, zero added latency.
+                prefetch_box = _start_answer_prefetch(text, uid)
                 # Everything else: the bot decides itself with the LLM gate
                 # (it sees recent conversation context).
                 who = user.get("first_name") or user.get("username") or "member"
                 if not _should_reply_llm(text, who, chat_id,
                                          is_owner=(uid == config.OWNER_CHAT_ID)):
                     return
+            else:
+                prefetch_box = _start_answer_prefetch(text, uid)
 
         # Conversational moderation: members can NEVER trigger actions on
         # their word — only the owner can. The owner's spoken request becomes
@@ -1008,6 +1116,8 @@ def handle_message(msg) -> None:
             question = text[ask_match.end():].strip()
         else:
             question = text
+        if prefetch_box is None:
+            prefetch_box = _start_answer_prefetch(text, uid)
         # Media-only message: give the gate something to judge from context
         # (e.g. the bot just asked for a screenshot).
         kinds = _media_kinds(msg)
@@ -1037,17 +1147,20 @@ def handle_message(msg) -> None:
                "username": user.get("username"), "group": True, "group_id": chat_id,
                "group_role": _group_role(chat_id, uid),
                "bot_admin": _bot_rights(chat_id),
-               "media": media, "recent_log": _recent}
+               "media": media, "recent_log": _recent, "prefetch": prefetch_box}
         try:
             res = agent.answer(question, ctx)
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
+        # Deliver FIRST — the answer must reach the user before any DB bookkeeping.
+        _deliver_answer(chat_id, res, reply_to=msg.get("message_id"))
         # Long-term memory of what the bot ACTUALLY answered — grounding
         # for future 'kya tumne bola/bheja tha' questions (no false claims).
+        # SPEED: after delivery — this Mongo write no longer sits between
+        # the user's question and the bot's answer.
         _remember_qa(uid, chat_id, question, res.get("text"),
                      msg.get("date"))
-        _deliver_answer(chat_id, res, reply_to=msg.get("message_id"))
         return
 
 
@@ -1076,7 +1189,7 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
     interim = (res.get("interim") or "").strip()
     if interim:
         _send_and_remember(interim)
-        time.sleep(0.6)
+        time.sleep(0.4)
 
     text = res.get("text") or ""
     parts = [p.strip() for p in text.split("<SPLIT>") if p.strip()]
@@ -1084,7 +1197,7 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
         for i, part in enumerate(parts):
             _send_and_remember(part)
             if i < len(parts) - 1:
-                time.sleep(0.6)
+                time.sleep(0.4)
     elif not interim:
         _send_and_remember("🤔 Samajh nahi aaya — thoda detail me pucho.")
 

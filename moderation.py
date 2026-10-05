@@ -311,23 +311,29 @@ def handle_group_message(msg: dict) -> bool:
         count = _strike("moderation_strike", chat_id, user_id)
         name = (user.get("first_name") or user.get("username") or "Member").strip()
         mid = msg.get("message_id")
+        # DELETE FIRST, announce AFTER — the notice claims deletion only
+        # when the Telegram API actually confirmed it (never a fake claim).
+        delete_result = tg_api.delete_message(chat_id, mid)
+        deleted = bool(delete_result.get("ok"))
         if count == 1:
-            notice = f"⚠️ {name}, gaali wala message uda diya. Pehli aur aakhri warning — Repeat kiya to seedha 10-minute mute; ban nahi karunga."
+            notice = (
+                f"⚠️ {name}, gaali wala message uda diya. Pehli aur aakhri "
+                "warning — Repeat kiya to seedha 10-minute mute; ban nahi "
+                "karunga.") if deleted else (
+                f"⚠️ {name}, aisi language mat use karo. Message delete nahi "
+                "ho paya — bot ko Delete Messages permission chahiye.")
         else:
             mute_result = _mute(chat_id, user_id, MUTE_MINUTES)
             if mute_result.get("ok"):
                 notice = f"⏱ {name} ko repeat violation par {MUTE_MINUTES} minute mute kiya. Ban nahi kiya."
             else:
                 notice = f"⚠️ {name}, repeat violation. Mute apply nahi hua—bot ko Restrict Members permission chahiye."
-        # Owner rule: notice REPLY ke roop me offender ke message par jaye,
-        # uske baad message delete ho (proof thread reh jata hai).
+        # Owner rule: notice offender ke message ka REPLY hai (proof thread).
+        # Jab message delete ho chuka ho to reply-target gayab ho sakta hai —
+        # _say_reply ka plain-send fallback us case me sambhalta hai.
         _say_reply(chat_id, notice, mid)
-        delete_result = tg_api.delete_message(chat_id, mid)
-        if not delete_result.get("ok"):
-            tg_api.send_message(
-                chat_id, "⚠️ Message delete nahi hua — bot ko Delete Messages "
-                "permission chahiye.")
-        log_action("abuse_delete", chat_id, target_id=user_id,
+        log_action("abuse_delete" if deleted else "abuse_delete_failed",
+                   chat_id, target_id=user_id,
                    target_name=name, reason=term)
         if count > 1:
             log_action("abuse_automute", chat_id, target_id=user_id,
@@ -341,11 +347,20 @@ def handle_group_message(msg: dict) -> bool:
         count = _strike("promo_strike", chat_id, user_id)
         name = (user.get("first_name") or user.get("username") or "Member").strip()
         mid = msg.get("message_id")
+        # Delete first, then announce the REAL outcome (never a fake claim).
+        delete_result = tg_api.delete_message(chat_id, mid)
+        deleted = bool(delete_result.get("ok"))
         if count == 1:
-            notice = (
-                f"🚫 {name}, group me apne channel/group ka promotion allowed nahi hai. "
-                f"Message delete kar diya ({promo}). Dobara kiya to mute kar dunga."
-            )
+            if deleted:
+                notice = (
+                    f"🚫 {name}, group me apne channel/group ka promotion allowed nahi hai. "
+                    f"Message delete kar diya ({promo}). Dobara kiya to mute kar dunga."
+                )
+            else:
+                notice = (
+                    f"🚫 {name}, promotion allowed nahi hai ({promo}). Message delete "
+                    "nahi ho paya — bot ko Delete Messages permission chahiye."
+                )
         else:
             mute_result = _mute(chat_id, user_id, MUTE_MINUTES)
             if mute_result.get("ok"):
@@ -359,12 +374,8 @@ def handle_group_message(msg: dict) -> bool:
                     f"Restrict Members permission chahiye."
                 )
         _say_reply(chat_id, notice, mid)
-        delete_result = tg_api.delete_message(chat_id, mid)
-        if not delete_result.get("ok"):
-            tg_api.send_message(
-                chat_id, "⚠️ Message delete nahi hua — bot ko Delete Messages "
-                "permission chahiye.")
-        log_action("promo_delete", chat_id, target_id=user_id,
+        log_action("promo_delete" if deleted else "promo_delete_failed",
+                   chat_id, target_id=user_id,
                    target_name=name, reason=promo)
         if count > 1:
             log_action("promo_automute", chat_id, target_id=user_id,
@@ -496,6 +507,22 @@ _STOPWORDS_TARGET = {
 }
 
 
+def _member_in_group(chat_id: int, user_id: int) -> bool:
+    """True when Telegram confirms the user is currently in this group.
+
+    Name-based lookups MUST be verified — an old memory hit (user left,
+    or a stale partial match) would otherwise unmute/ban the WRONG person.
+    """
+    if not chat_id or not user_id:
+        return False
+    try:
+        member = tg_api.get_chat_member(chat_id, user_id) or {}
+        return member.get("status") in ("member", "administrator",
+                                        "creator", "restricted")
+    except Exception:
+        return False
+
+
 def _resolve_target(msg: dict, arg: str | None,
                     chat_id: int | None = None) -> tuple[int | None, str]:
     """Resolve a mod-command target.
@@ -503,7 +530,9 @@ def _resolve_target(msg: dict, arg: str | None,
     Order: reply -> numeric id -> @username -> FIRST-NAME/NAME lookup.
     Name lookup searches stored messages for a matching username/first_name
     (partial, case-insensitive), most recent first — so the owner can simply
-    say 'unmute rich ko' instead of tagging.
+    say 'unmute rich ko' instead of tagging. Every name-based hit is then
+    VERIFIED live (getChatMember) so a stale/wrong match can never receive
+    the action.
     """
     reply_from = (msg.get("reply_to_message") or {}).get("from") or {}
     if reply_from.get("id"):
@@ -526,7 +555,8 @@ def _resolve_target(msg: dict, arg: str | None,
         same_chat = [d for d in docs if d.get("chat_id") == chat_id]
         docs = same_chat or docs
     docs.sort(key=lambda d: d.get("date") or 0, reverse=True)
-    best = None
+    # Collect candidates: exact matches first, then partials.
+    exact, partial = [], []
     for doc in docs:
         if not doc.get("user_id"):
             continue
@@ -534,20 +564,20 @@ def _resolve_target(msg: dict, arg: str | None,
         first = (doc.get("first_name") or "").casefold()
         if exact_uname:
             if username == wanted:
-                best = doc
-                break
+                exact.append(doc)
             continue
-        # Bare-name lookup: exact first, then partial (>=3 chars to avoid
-        # random short-substring hits).
         if first == wanted or username == wanted:
-            best = doc
-            break
-        if len(wanted) >= 3 and (wanted in username or wanted in first):
-            best = doc
-            break
-    if best and best.get("user_id"):
-        label = (best.get("first_name") or "@" + str(best.get("username") or wanted))
-        return best["user_id"], label
+            exact.append(doc)
+        elif len(wanted) >= 3 and (wanted in username or wanted in first):
+            partial.append(doc)
+    # Best candidate = exact match verified in-group, else partial verified.
+    for pool in (exact, partial):
+        for doc in pool:
+            uid = doc.get("user_id")
+            if _member_in_group(chat_id, uid):
+                label = (doc.get("first_name")
+                         or "@" + str(doc.get("username") or wanted))
+                return uid, label
     return None, ""
 
 
@@ -595,8 +625,9 @@ _MOD_COMMANDS = {
     "modlog",
     "warn", "warnings", "resetwarns",
     "kick", "purge", "pin", "unpin",
+    "purgeuser",
 }
-_OWNER_ONLY_COMMANDS = {"ban", "unban", "stopall", "kick"}
+_OWNER_ONLY_COMMANDS = {"ban", "unban", "stopall", "kick", "purgeuser"}
 _WARN_LIMIT = 3
 _WARN_AUTOMUTE_MINUTES = 60
 
@@ -669,6 +700,47 @@ def handle_mod_command(msg: dict, uid: int, chat_id: int) -> bool:
             reason = f" ({doc.get('reason')})" if doc.get("reason") else ""
             lines.append(f"• {doc.get('action')} → {target}{reason} — by {doc.get('by_name')}")
         return say("\n".join(lines))
+
+    # ---- /purgeuser (owner only) — full reset for a user ----
+    # Owner's spoken form: 'X ka complete data delete kar do aur unmute kro'.
+    # Wipes learned memory (messages + Q&A), warnings, strikes, mute state,
+    # and lifts any active restriction. Reports exactly what was done.
+    if cmd == "purgeuser":
+        target_arg = tokens[0] if (tokens := args.split()) else None
+        target_id, target_name = _resolve_target(msg, target_arg, chat_id)
+        if not target_id:
+            return say("Usage: /purgeuser <reply|user_id|@username|naam>\n"
+                       "User ka pura data delete + warnings/strikes reset + "
+                       "unmute — sab ek command me.")
+        if target_id == config.OWNER_CHAT_ID:
+            return say("❌ Owner ka data kabhi delete nahi hota.")
+        wiped_msgs = wiped_qa = 0
+        try:
+            wiped_msgs = get_db()["messages"].delete_many(
+                {"user_id": target_id}).deleted_count
+            wiped_qa = get_db()["qa"].delete_many(
+                {"user_id": target_id}).deleted_count
+        except Exception:
+            pass
+        for key in (f"warn_count:{chat_id}:{target_id}",
+                    f"moderation_strike:{chat_id}:{target_id}",
+                    f"promo_strike:{chat_id}:{target_id}",
+                    f"mod_mute:{chat_id}:{target_id}"):
+            save_state(key, 0)
+        unmuted = False
+        if _bot_has_right(chat_id, "can_restrict_members"):
+            r = tg_api.restrict_chat_member(
+                chat_id, target_id, _UNMUTE_PERMISSIONS, until_date=None)
+            unmuted = bool(r.get("ok"))
+        log_action("purgeuser", chat_id, target_id=target_id,
+                   target_name=target_name, by_id=uid, by_name=by_name,
+                   reason=f"msgs:{wiped_msgs} qa:{wiped_qa} unmute:{unmuted}")
+        parts = [f"🧹 {target_name} ka pura reset ho gaya:",
+                 f"• Memory me se {wiped_msgs} messages aur {wiped_qa} Q&A delete",
+                 "• Warnings aur strikes reset"]
+        parts.append("• Unmute kar diya ✅" if unmuted else
+                     "• Unmute nahi ho paya — Restrict Members permission chahiye")
+        return say("\n".join(parts))
 
     # ---- /warn (privileged; 3 warns = 1h auto-mute + reset) ----
     if cmd == "warn":

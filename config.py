@@ -65,6 +65,12 @@ POST_TTL_DAYS = _int("POST_TTL_DAYS", 120)
 FILE_POST_TTL_DAYS = _int("FILE_POST_TTL_DAYS", 240)
 KEY_BACKOFF_SECONDS = _int("KEY_BACKOFF_SECONDS", 600)
 AI_REQUEST_TIMEOUT = _int("AI_REQUEST_TIMEOUT", 25)
+# SPEED: chat replies need a few sentences, not 1024 tokens. Output length
+# drives generation time — this cap cuts several seconds off every answer.
+ANSWER_MAX_TOKENS = _int("ANSWER_MAX_TOKENS", 350)
+# SPEED: the reply-gate is a one-word YES/NO — never let a stuck gate call
+# hold the answer for the full AI_REQUEST_TIMEOUT.
+GATE_TIMEOUT_SECONDS = _int("GATE_TIMEOUT_SECONDS", 10)
 # User ki request: 1 hafta se zyada idle user ki memory delete hone se
 # pehle owner ko ek baar DM notice zaroor jata hai.
 USER_MEMORY_IDLE_DAYS = max(1, _int("USER_MEMORY_IDLE_DAYS", 7))

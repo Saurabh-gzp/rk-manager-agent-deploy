@@ -103,9 +103,17 @@ class NameResolveTests(unittest.TestCase):
         self.p_get = patch.object(moderation, "get_state", gs)
         self.p_save = patch.object(moderation, "save_state", ss)
         self.p_db = patch.object(moderation, "get_db", lambda: self.db)
-        for p in (self.p_get, self.p_save, self.p_db):
+        # Name hits are VERIFIED live via getChatMember (safety: a stale
+        # memory match must never receive the action). Simulate Telegram
+        # confirming membership for the stored user.
+        self.p_member = patch.object(
+            moderation, "_member_in_group",
+            lambda chat_id, uid: uid == 6857910750)
+        for p in (self.p_get, self.p_save, self.p_db, self.p_member):
             p.start()
-        self.addCleanup(lambda: [p.stop() for p in (self.p_get, self.p_save, self.p_db)])
+        self.addCleanup(
+            lambda: [p.stop() for p in (self.p_get, self.p_save, self.p_db,
+                                        self.p_member)])
         # stored messages: 'the rich' @richislive0
         self.db["messages"].docs = [
             {"chat_id": -100, "user_id": 6857910750, "username": "richislive0",
@@ -127,6 +135,14 @@ class NameResolveTests(unittest.TestCase):
         msg = {"reply_to_message": {}}
         uid, _ = moderation._resolve_target(msg, "nobodysname", -100)
         self.assertIsNone(uid)
+
+    def test_left_member_not_resolved(self):
+        """A stale memory hit whose live membership check FAILS is dropped —
+        this is the wrong-user-action safety net."""
+        with patch.object(moderation, "_member_in_group", return_value=False):
+            msg = {"reply_to_message": {}}
+            uid, _ = moderation._resolve_target(msg, "rich", -100)
+            self.assertIsNone(uid)
 
 
 class TeachTests(unittest.TestCase):

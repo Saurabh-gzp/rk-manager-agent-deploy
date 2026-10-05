@@ -178,7 +178,7 @@ class PromptGuardrailTests(unittest.TestCase):
 
     def test_lookup_honesty_in_followup(self):
         router = MagicMock()
-        router.generate.side_effect = lambda prompt, system=None: f"CAPTURED::{prompt[:50]}"
+        router.generate.side_effect = lambda prompt, system=None, **kw: f"CAPTURED::{prompt[:50]}"
         with patch.object(agent.ai_engine, "get_router", return_value=router), \
                 patch.object(agent.knowledge, "search", return_value=[]), \
                 patch.object(agent.tg_api, "send_message", return_value={"ok": True}):

@@ -1,7 +1,24 @@
-# RK Manager Agent 🤖 v2
+# RK Manager Agent 🤖 v3
 
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
+
+## v3.0 SPEED kit (reply latency fix)
+
+Replies were taking 15–35s. Root causes (live-measured on the free tiers)
+and fixes:
+
+| Cause | Measured | Fix |
+|---|---|---|
+| knowledge.search = 5 queries × up to 6 tokens (30 Atlas roundtrips), ran TWICE per answer | ~4.3s ×2 | ONE combined `$or` pass per collection (~0.43s, 10×) |
+| 6+ state reads per message (filters/terms/teach/rules/links) | ~816ms | in-process write-through state cache (~0ms) |
+| fresh TCP+TLS per Telegram API call | 576–834ms/call | persistent keep-alive connection (192ms/call, 3×) |
+| gate LLM + answer LLM sequential, search stacked after gate | seconds | answer-context prefetch runs DURING the gate call |
+| answers generated up to 1024 tokens | seconds | `ANSWER_MAX_TOKENS` (default 350) |
+| qa/ingest Mongo writes sat between question and answer | ~300ms | moved after delivery |
+| Gemini hidden "thinking" latency | varies | `thinkingConfig.thinkingBudget=0` with self-healing fallback |
+
+New env knobs: `ANSWER_MAX_TOKENS` (350), `GATE_TIMEOUT_SECONDS` (10).
 
 ## Kya karta hai
 

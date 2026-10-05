@@ -128,15 +128,36 @@ def _gemini_post(key: str, model: str, body: dict, timeout: int) -> tuple[str, s
     return text, ""
 
 
+# SPEED: Gemini 2.5+/3.x "flash" models can burn seconds on hidden
+# chain-of-thought before the first visible token. thinkingBudget=0 turns
+# it off. If a model/endpoint rejects the field, we flip the flag off for
+# the process lifetime and retry once WITHOUT it — self-healing, zero risk.
+_THINKING_OFF_OK = True
+
+
+def _param_rejected(err: str) -> bool:
+    e = (err or "").lower()
+    return any(s in e for s in (
+        "invalid", "unknown name", "unsupported", "thinking", "bad request"))
+
+
 def _gemini_call(key: str, model: str, prompt: str, system: str | None,
                  max_tokens: int, timeout: int) -> tuple[str, str]:
     """Return (text, error). Empty text + non-empty error means failure."""
+    global _THINKING_OFF_OK
     full_prompt = (f"{system.strip()}\n\n{prompt.strip()}" if system else prompt)
     body = {
         "contents": [{"parts": [{"text": full_prompt}]}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7},
     }
-    return _gemini_post(key, model, body, timeout)
+    if _THINKING_OFF_OK:
+        body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
+    text, err = _gemini_post(key, model, body, timeout)
+    if err and _THINKING_OFF_OK and _param_rejected(err):
+        _THINKING_OFF_OK = False  # never send it again this process
+        body["generationConfig"].pop("thinkingConfig", None)
+        text, err = _gemini_post(key, model, body, timeout)
+    return text, err
 
 
 def _gemini_call_mm(key: str, model: str, prompt: str, system: str | None,
@@ -146,6 +167,7 @@ def _gemini_call_mm(key: str, model: str, prompt: str, system: str | None,
 
     DeepSeek has no vision/audio — this is Gemini-only by design.
     """
+    global _THINKING_OFF_OK
     parts: list[dict] = []
     if system and system.strip():
         parts.append({"text": system.strip()})
@@ -159,7 +181,14 @@ def _gemini_call_mm(key: str, model: str, prompt: str, system: str | None,
         "contents": [{"parts": parts}],
         "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7},
     }
-    return _gemini_post(key, model, body, timeout)
+    if _THINKING_OFF_OK:
+        body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
+    text, err = _gemini_post(key, model, body, timeout)
+    if err and _THINKING_OFF_OK and _param_rejected(err):
+        _THINKING_OFF_OK = False
+        body["generationConfig"].pop("thinkingConfig", None)
+        text, err = _gemini_post(key, model, body, timeout)
+    return text, err
 
 
 def _deepseek_call(key: str, model: str, prompt: str, system: str | None,

@@ -106,7 +106,7 @@ class RulesInjectionTests(unittest.TestCase):
     def _capture_prompt(self, question):
         prompts = []
         router = MagicMock()
-        router.generate.side_effect = lambda p, system=None: prompts.append(p) or "jawab"
+        router.generate.side_effect = lambda p, system=None, **kw: prompts.append(p) or "jawab"
         with patch.object(agent.ai_engine, "get_router", return_value=router), \
                 patch.object(agent.knowledge, "search", return_value=[]):
             agent.answer(question, {"user_id": 123, "chat_id": CHAT})
@@ -121,7 +121,7 @@ class RulesInjectionTests(unittest.TestCase):
     def test_knowledge_branch_has_rules(self):
         prompts = []
         router = MagicMock()
-        router.generate.side_effect = lambda p, system=None: prompts.append(p) or "jawab"
+        router.generate.side_effect = lambda p, system=None, **kw: prompts.append(p) or "jawab"
         hits = [{"text": "app install issue", "kind": "message"}]
         with patch.object(agent.ai_engine, "get_router", return_value=router), \
                 patch.object(agent.knowledge, "search", return_value=hits):

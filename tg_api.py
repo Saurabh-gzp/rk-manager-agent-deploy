@@ -1,13 +1,27 @@
-"""Telegram Bot API client (urllib only — no external deps)."""
+"""Telegram Bot API client (stdlib only — no external deps).
+
+SPEED: keeps ONE persistent HTTPS connection to api.telegram.org.
+urllib opens a fresh TCP+TLS handshake per call (~0.5-0.8s measured);
+with a keep-alive connection each call costs one roundtrip instead of
+three. Falls back to a fresh urllib request for long polls (getUpdates)
+and file downloads, and auto-reconnects on a dead connection.
+"""
 from __future__ import annotations
+import http.client
 import json
 import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 
 API_HOST = "https://api.telegram.org"
+API_HOSTNAME = "api.telegram.org"
 MAX_TEXT = 4096
+
+# --- persistent connection (keep-alive) ---
+_CONN: http.client.HTTPSConnection | None = None
+_CONN_LOCK = threading.Lock()
 
 
 def _resolve_token() -> str:
@@ -17,13 +31,9 @@ def _resolve_token() -> str:
     return token
 
 
-def _tg_url(method: str) -> str:
+def _tg_path(method: str) -> str:
     token = _resolve_token()
-    url = f"https://api.telegram.org/bot{token}/{method}"
-    host = urllib.parse.urlparse(url).hostname or ""
-    if host != "api.telegram.org":
-        raise ValueError(f"refusing non-Telegram host: {host}")
-    return url
+    return f"/bot{token}/{method}"
 
 
 def _read_json(resp) -> dict:
@@ -58,24 +68,65 @@ def _multipart(params: dict, files: dict) -> tuple[bytes, str]:
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
-def api(method: str, params: dict | None = None, files: dict | None = None, timeout: int = 60) -> dict:
-    """Call a Bot API method. Never raises."""
-    params = params or {}
-    url = _tg_url(method)
+def _encode_body(params: dict, files: dict | None) -> tuple[bytes, str]:
     if files:
-        data, ctype = _multipart(params, files)
-        headers = {"Content-Type": ctype}
-    else:
-        form = {}
-        for k, v in params.items():
-            if v is None:
-                continue
-            if isinstance(v, (dict, list)):
-                v = json.dumps(v)
-            form[k] = str(v)
-        data = urllib.parse.urlencode(form).encode("utf-8")
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        return _multipart(params, files)
+    form = {}
+    for k, v in (params or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, (dict, list)):
+            v = json.dumps(v)
+        form[k] = str(v)
+    return urllib.parse.urlencode(form).encode("utf-8"), \
+        "application/x-www-form-urlencoded"
+
+
+def _api_keepalive(method: str, body: bytes, ctype: str,
+                   timeout: int) -> dict | None:
+    """POST over the shared keep-alive connection. None = connection-level
+    failure (caller falls back to urllib); dict = actual API response."""
+    global _CONN
+    with _CONN_LOCK:
+        for _ in range(2):  # one reconnect attempt on a dead socket
+            try:
+                if _CONN is None:
+                    _CONN = http.client.HTTPSConnection(
+                        API_HOSTNAME, timeout=timeout)
+                _CONN.request("POST", _tg_path(method), body=body,
+                              headers={"Content-Type": ctype})
+                resp = _CONN.getresponse()
+                raw = resp.read()
+                try:
+                    return json.loads(raw.decode("utf-8", "replace"))
+                except Exception:
+                    return {"ok": False, "description": "non-json response"}
+            except Exception:
+                try:
+                    if _CONN is not None:
+                        _CONN.close()
+                except Exception:
+                    pass
+                _CONN = None  # reconnect on next loop/pass
+    return None
+
+
+def api(method: str, params: dict | None = None, files: dict | None = None, timeout: int = 20) -> dict:
+    """Call a Bot API method. Never raises.
+
+    Short calls ride the persistent keep-alive connection; long polls and
+    oversized timeouts use a one-shot urllib request (so a 50s getUpdates
+    never blocks every other call on the shared socket).
+    """
+    params = params or {}
+    body, ctype = _encode_body(params, files)
+    if timeout <= 30:
+        r = _api_keepalive(method, body, ctype, timeout)
+        if r is not None:
+            return r
+    # fallback / long-poll path (fresh connection)
+    url = f"https://{API_HOSTNAME}{_tg_path(method)}"
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": ctype}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return _read_json(resp)
