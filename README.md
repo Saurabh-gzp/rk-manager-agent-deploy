@@ -20,6 +20,23 @@ and fixes:
 
 New env knobs: `ANSWER_MAX_TOKENS` (350), `GATE_TIMEOUT_SECONDS` (10).
 
+## v3.1 REAL AGENT kit (screenshot-reported fixes)
+
+6 live issues — root causes found in code and fixed:
+
+| Issue (screenshot) | Root cause | Fix |
+|---|---|---|
+| Link diya, LLM ne sirf baat ki — real forward kabhi nahi hua | `channel_forward.py` likha gaya tha par **kabhi bot.py me wire hi nahi hua** (dead code!) | group + owner DM dono me wired — LLM se PEHLE chalta hai; `t.me/<channel>/<post>` link, `/get 245`, "latest", "vo wala message bhejo" — sab par REAL `forwardMessage` |
+| Channel add pe "kisi ne add kiya (8781539682)... leave kar diya" jhooth | 8781539682 = bot ka APNA id — `get_me()` cold-start fail → system auto-add ko stranger add samajh liya | bot id ab update ke `new_chat_member.user` se seedha — network pe depend nahi |
+| "check kar raha hu... thodi der me batata hu" fake progress | sanitize regex "nikal kar pahuncha deta hu" / "share karta hu" miss karta tha | future-promise patterns add — ye sentences ship hi nahi hote |
+| Member ne rule set kar diya, bot ne maan liya | prompt me hierarchy likha tha par enforce nahi hota tha | MEMBER ke standing-instruction par refusal FACT inject + prompt hardening |
+| Owner ki casual baat se naya rule ban gaya | RULE: line save hone ke liye sirf "owner sender" check tha | question me instruction-intent (karna/mat/ab se/...) hone par hi RULE save hota hai |
+| "owner/channel ke bare me record nahi hai" | v3.0 me community facts aa gaye + v3.1 me creator fallback | description me Owner: line na ho to `getChatAdministrators` se creator nikalta hai (cached) |
+
+Reply-gate bhi tight: statements/narrations ("kal diya tha...", "khela hu",
+"acha") jaise unaddressed messages par bot ab reply nahi karta — jab koi
+sawal/request/directed message ho tabhi jawab aata hai.
+
 ## Kya karta hai
 
 - **Seekhta hai**: Group chats + channel posts MongoDB me save. MongoDB unavailable ho to RAM fallback use hota hai; restart par us fallback ka data lost hota hai.

@@ -218,8 +218,12 @@ def handle_forward_request(msg: dict, chat_id: int, uid: int) -> bool:
         source = int(f"-100{internal}")
         if cid and source == cid:
             _remember_link(chat_id, source, post_id)
-            return _forward_post(chat_id, source, post_id, mid,
-                                 f"post #{post_id}")
+            # Group me intent chahiye (koi bhi link paste karke auto-forward
+            # nahi karwa sakta); owner DM me bare link hi delivery hai.
+            if _INTENT_RE.search(low) or chat_id > 0:
+                return _forward_post(chat_id, source, post_id, mid,
+                                     f"post #{post_id}")
+            return False
         # Foreign private channel — honest refusal, LLM never sees it.
         if _INTENT_RE.search(low):
             _say_reply(chat_id, "❌ Main sirf apne linked channel se forward "
@@ -232,8 +236,12 @@ def handle_forward_request(msg: dict, chat_id: int, uid: int) -> bool:
         source = _resolve_link_source(username)
         if source:
             _remember_link(chat_id, source, post_id)
-            return _forward_post(chat_id, source, post_id, mid,
-                                 f"post #{post_id}")
+            # Group: forward only on intent ('forward karna', 'bhejo',
+            # 'mujhe', ...). Owner DM: bare deep-link = delivery request.
+            if _INTENT_RE.search(low) or chat_id > 0:
+                return _forward_post(chat_id, source, post_id, mid,
+                                     f"post #{post_id}")
+            return False
         # A link with a post id that is NOT our channel, with forward
         # intent — own the answer honestly so the LLM can't fake it.
         if _INTENT_RE.search(low) and cid:
@@ -317,8 +325,10 @@ def handle_get_command(msg: dict, chat_id: int, uid: int) -> bool:
     m = _LINK_PUBLIC_RE.search(arg) or _LINK_PRIVATE_RE.search(arg)
     if m:
         if _LINK_PRIVATE_RE.fullmatch(arg) or _LINK_PUBLIC_RE.fullmatch(arg):
+            # /get <link> — explicit delivery command: intent guaranteed,
+            # handle_forward_request ko intent word ke sath bhejo.
             return handle_forward_request(
-                {**msg, "text": arg.replace("/", " ", 1)}, chat_id, uid)
+                {**msg, "text": "forward karo " + arg}, chat_id, uid)
     if re.fullmatch(r"\d{1,6}", arg):
         return _forward_post(chat_id, cid, int(arg), mid, f"post #{arg}")
     _say_reply(chat_id, "Samajh nahi aaya — post ka number do, t.me link do, "

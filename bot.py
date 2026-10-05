@@ -635,7 +635,12 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
         + "- it clearly expects your response.\n"
         + "Answer NO if:\n"
         + "- it is banter, jokes, or chatter between members, or\n"
-        + "- it is directed at another member, or\n"
+        + "- it is directed at another member (a reply to them, or "
+          "mentioning them), or\n"
+        + "- it is a statement or narration NOT addressed to you — someone "
+          "sharing info, reacting, or answering ANOTHER member (e.g. 'kal "
+          "diya tha ...', 'khela hu', 'acha', 'ye mast hai', 'so gya tha') "
+          "— even if the topic touches something you said before, or\n"
         + "- it is just a greeting, thanks, ok, hmm with nothing else.\n"
         + "Answer with exactly one word: YES or NO."
     )
@@ -746,7 +751,7 @@ def handle_my_chat_member(update) -> None:
             pass
         return
 
-    bot_id = _bot_id()
+    bot_id = ((new.get("user") or {}).get("id")) or _bot_id()
 
     # ---- CASE 1: Telegram system auto-add (adder is the bot itself) ----
     # Jab bot channel ka admin banta hai, Telegram uske linked discussion
@@ -971,6 +976,13 @@ def handle_message(msg) -> None:
             return
         if not is_owner:
             return
+        # Channel content delivery in DM too (/get + link/number/'vo wala')
+        # — owner DM me bhi REAL forward hota hai, sirf baat nahi.
+        channel_forward.note_link_in_text(chat_id, text)
+        if channel_forward.handle_get_command(msg, chat_id, uid):
+            return
+        if channel_forward.handle_forward_request(msg, chat_id, uid):
+            return
         # otherwise: treat as a normal question (owner context)
         kinds = _media_kinds(msg)
         if not text and not kinds:
@@ -1007,6 +1019,16 @@ def handle_message(msg) -> None:
         _remember(chat_id, _who,
                   text or " ".join(_MEDIA_KIND_LABEL[k] for k in _media_kinds(msg)),
                   is_owner=(uid == config.OWNER_CHAT_ID))
+
+        # Deterministic REAL channel-content delivery — t.me link, post
+        # number, 'latest', ya 'vo wala message bhejo'. Ye sabse PEHLE
+        # chalta hai (teach/LLM se bhi pehle): forwardMessage sach me hota
+        # hai, LLM kabhi sirf 'nikal kar pahuncha deta hu' bol nahi sakta.
+        channel_forward.note_link_in_text(chat_id, text)
+        if channel_forward.handle_forward_request(msg, chat_id, uid):
+            return
+        if channel_forward.handle_get_command(msg, chat_id, uid):
+            return
 
         # Owner-taught auto-actions ('/sikhao' system) fire on normal
         # messages BEFORE any gate — jo sikhaya gaya hai wahi hoga.

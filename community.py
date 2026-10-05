@@ -80,6 +80,35 @@ def extract_channel_owner(description: str | None) -> str:
     return handle if handle.startswith("@") else "@" + handle
 
 
+def _channel_creator(cid: int) -> str:
+    """Channel creator via getChatAdministrators — a REAL tool check.
+
+    v3.1: description me 'Owner:' line na bhi ho, tab bhi channel ke
+    admins list se creator (status='creator') nikal lo — 'channel ka owner
+    kaun hai' ka jawab hamesha live data se aayega, guess se nahi. Cached
+    in state (creators change ~never)."""
+    hit = _cached("community_channel_creator")
+    if isinstance(hit, str) and hit:
+        return hit
+    try:
+        admins = tg_api.get_chat_administrators(cid) or []
+    except Exception:
+        return ""
+    for a in admins:
+        u = a.get("user") or {}
+        if a.get("status") == "creator":
+            if u.get("username"):
+                handle = "@" + u["username"].lstrip("@")
+                _store("community_channel_creator", handle)
+                return handle
+            name = (u.get("first_name") or "").strip()
+            if name:
+                _store("community_channel_creator", name)
+                return name
+            return ""
+    return ""
+
+
 def owner_identity() -> dict:
     """The bot OWNER's identity: {name, username, id}."""
     oid = config.OWNER_CHAT_ID
@@ -106,6 +135,9 @@ def channel_identity() -> dict:
         return {}
     ident = _chat_identity(cid, "community_channel")
     owner_handle = extract_channel_owner(ident.get("description"))
+    if not owner_handle:
+        # v3.1: description fallback — REAL admin list se creator nikaalo.
+        owner_handle = _channel_creator(cid)
     out = {
         "id": cid,
         "title": ident.get("title") or "",
@@ -193,7 +225,8 @@ def community_block() -> str:
 def refresh_now() -> None:
     """Force-drop the identity caches (owner panel 'refresh' hook)."""
     try:
-        for k in ("community_owner", "community_channel", "community_group"):
+        for k in ("community_owner", "community_channel", "community_group",
+                  "community_channel_creator"):
             save_state(k, {})
     except Exception:
         pass
