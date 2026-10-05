@@ -171,6 +171,22 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None,
     return first or {}
 
 
+def send_message_html(chat_id, html_text, plain_text,
+                      reply_markup=None, reply_to_message_id=None) -> dict:
+    """v3.3: send rich-formatted text (parse_mode=HTML) with a guaranteed
+    plain-text fallback — a formatting glitch can never lose the message."""
+    r = send_message(chat_id, html_text, reply_markup=reply_markup,
+                     parse_mode="HTML",
+                     reply_to_message_id=reply_to_message_id)
+    if r.get("ok"):
+        return r
+    desc = str(r.get("description") or "").lower()
+    if "parse" in desc or "entity" in desc or "bad request" in desc:
+        return send_message(chat_id, plain_text, reply_markup=reply_markup,
+                            reply_to_message_id=reply_to_message_id)
+    return r
+
+
 def edit_message_text(chat_id, message_id, text, reply_markup=None,
                       parse_mode=None, link_preview_options=None) -> dict:
     return api("editMessageText", {
@@ -306,7 +322,7 @@ def forward_message(to_chat_id, from_chat_id, message_id,
 
 
 def send_document(chat_id, file_id_or_path, caption=None,
-                  reply_to_message_id=None) -> dict:
+                  reply_to_message_id=None, parse_mode=None) -> dict:
     if isinstance(file_id_or_path, str) and file_id_or_path.startswith("@"):
         path = file_id_or_path[1:]
         try:
@@ -318,32 +334,37 @@ def send_document(chat_id, file_id_or_path, caption=None,
         return api(
             "sendDocument",
             {"chat_id": chat_id, "caption": caption,
+             "parse_mode": parse_mode,
              "reply_to_message_id": reply_to_message_id},
             files={"document": (filename, data, "application/octet-stream")},
         )
     return api("sendDocument", {"chat_id": chat_id, "document": file_id_or_path,
                                  "caption": caption,
+                                 "parse_mode": parse_mode,
                                  "reply_to_message_id": reply_to_message_id})
 
 
 def send_photo(chat_id, file_id, caption=None,
-               reply_to_message_id=None) -> dict:
+               reply_to_message_id=None, parse_mode=None) -> dict:
     return api("sendPhoto", {"chat_id": chat_id, "photo": file_id,
                              "caption": caption,
+                             "parse_mode": parse_mode,
                              "reply_to_message_id": reply_to_message_id})
 
 
 def send_video(chat_id, file_id, caption=None,
-               reply_to_message_id=None) -> dict:
+               reply_to_message_id=None, parse_mode=None) -> dict:
     return api("sendVideo", {"chat_id": chat_id, "video": file_id,
                              "caption": caption,
+                             "parse_mode": parse_mode,
                              "reply_to_message_id": reply_to_message_id})
 
 
 def send_audio(chat_id, file_id, caption=None,
-               reply_to_message_id=None) -> dict:
+               reply_to_message_id=None, parse_mode=None) -> dict:
     return api("sendAudio", {"chat_id": chat_id, "audio": file_id,
                              "caption": caption,
+                             "parse_mode": parse_mode,
                              "reply_to_message_id": reply_to_message_id})
 
 
@@ -355,9 +376,10 @@ def send_voice(chat_id, file_id, caption=None,
 
 
 def send_animation(chat_id, file_id, caption=None,
-                   reply_to_message_id=None) -> dict:
+                   reply_to_message_id=None, parse_mode=None) -> dict:
     return api("sendAnimation", {"chat_id": chat_id, "animation": file_id,
                                  "caption": caption,
+                                 "parse_mode": parse_mode,
                                  "reply_to_message_id": reply_to_message_id})
 
 
@@ -400,24 +422,29 @@ def delete_webhook(drop_pending=False) -> dict:
 
 
 def send_any_file(chat_id: int, file_id: str, file_type: str,
-                 caption: str = None, reply_to_message_id=None) -> dict:
+                 caption: str = None, reply_to_message_id=None,
+                 parse_mode=None) -> dict:
     """Send a stored media file by its stored file_id and detected type."""
     t = (file_type or "").lower()
     if t == "photo":
         return send_photo(chat_id, file_id, caption=caption,
-                          reply_to_message_id=reply_to_message_id)
+                          reply_to_message_id=reply_to_message_id,
+                          parse_mode=parse_mode)
     if t == "video":
         return send_video(chat_id, file_id, caption=caption,
-                          reply_to_message_id=reply_to_message_id)
+                          reply_to_message_id=reply_to_message_id,
+                          parse_mode=parse_mode)
     if t == "audio":
         return send_audio(chat_id, file_id, caption=caption,
-                          reply_to_message_id=reply_to_message_id)
+                          reply_to_message_id=reply_to_message_id,
+                          parse_mode=parse_mode)
     if t == "voice":
         return send_voice(chat_id, file_id, caption=caption,
                           reply_to_message_id=reply_to_message_id)
     if t == "animation":
         return send_animation(chat_id, file_id, caption=caption,
-                              reply_to_message_id=reply_to_message_id)
+                              reply_to_message_id=reply_to_message_id,
+                              parse_mode=parse_mode)
     if t == "sticker":
         return send_sticker(chat_id, file_id,
                             reply_to_message_id=reply_to_message_id)
@@ -425,7 +452,8 @@ def send_any_file(chat_id: int, file_id: str, file_type: str,
         return send_video_note(chat_id, file_id,
                                reply_to_message_id=reply_to_message_id)
     return send_document(chat_id, file_id, caption=caption,
-                         reply_to_message_id=reply_to_message_id)
+                         reply_to_message_id=reply_to_message_id,
+                         parse_mode=parse_mode)
 
 
 # ---------------------- Power upgrade additions ----------------------

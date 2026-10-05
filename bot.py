@@ -46,6 +46,7 @@ import commands  # noqa: E402
 import teach  # noqa: E402
 import channel_forward  # noqa: E402
 import community  # noqa: E402
+import fmt  # noqa: E402
 
 
 def log(*args):
@@ -164,10 +165,12 @@ _GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
 # Members can NEVER trigger actions on their word — owner only. The owner’s
 # spoken request is turned into a REAL command and run through the same
 # pipeline as /commands (never faked by just saying so).
+# v3.3: 'kro/krun/karna/krna' spellings added — 'delete kro' was being
+# missed entirely and the LLM answered with a fake 'koshish kar raha hu'.
 _MOD_REQUEST_RE = re.compile(r"""
     \b(hatao|udao|mitao|nikal|bahar)\b
-    | \b(delete|del|remove|uda|hata|mita|mute|unmute|ban|unban|kick)\w*\b.{0,25}\b(kar|karo|kr|krdo|kardo|de|do|dijiye)\b
-    | \b(kar|karo|kr|krdo|kardo|de|do|dijiye)\b.{0,25}\b(delete|del|remove|uda|hata|mita|mute|unmute|ban|unban|kick)\w*\b
+    | \b(delete|del|remove|uda|hata|mita|mute|unmute|ban|unban|kick)\w*\b.{0,25}\b(kar|karo|kro|krun|kr|krna|karna|krdo|kardo|de|do|dijiye|kroge|krogi)\b
+    | \b(kar|karo|kro|krun|kr|krdo|kardo|de|do|dijiye)\b.{0,25}\b(delete|del|remove|uda|hata|mita|mute|unmute|ban|unban|kick)\w*\b
 """, re.IGNORECASE | re.VERBOSE)
 
 
@@ -179,6 +182,103 @@ def _looks_like_mod_request(text: str) -> bool:
                  text, re.IGNORECASE):
         return False
     return bool(_MOD_REQUEST_RE.search(text))
+
+
+# ---------------------------------------------------------------------------
+# v3.3 — SELF-MESSAGE DELETION ('apne sabhi message delete kro' + /delmy).
+# The owner orders the bot to clean up ITS OWN recent messages; every
+# message the bot sends is id-tracked, so this deletes for REAL (the old
+# bot just said 'koshish kar raha hu' and did nothing).
+# ---------------------------------------------------------------------------
+_OWN_MSG_IDS: dict[int, deque] = {}
+
+
+def _track_own_message(chat_id: int, r: dict | None) -> None:
+    """Remember the id of every message WE send (for /delmy). Never raises."""
+    try:
+        if not r or not r.get("ok") or not chat_id:
+            return
+        mid = (r.get("result") or {}).get("message_id")
+        if mid:
+            dq = _OWN_MSG_IDS.get(chat_id)
+            if dq is None:
+                dq = deque(maxlen=200)
+                _OWN_MSG_IDS[chat_id] = dq
+            dq.append(int(mid))
+    except Exception:
+        pass
+
+
+_SELF_DELETE_RE = re.compile(
+    r"\b(apne|apna|apni|khud)\b.{0,50}\b(message|msg|messages|post|posts|likha|baat)\w*\b"
+    r".{0,60}\b(delete|del|remove|udao|uda|hatao|hata|mitao|mita|saaf|clear|clean)\w*"
+    r"|\b(delete|del|remove|udao|uda|hatao|hata|mitao|mita|saaf|clear|clean)\w*\b.{0,40}\b(apne|apna|apni|khud)\w*\b.{0,30}\b(message|msg|messages|post|posts)\b",
+    re.IGNORECASE,
+)
+
+
+def _handle_self_delete(msg: dict, uid: int, chat_id: int, text: str) -> bool:
+    """/delmy [N] or spoken 'apne (sabhi) message delete karo' — really
+    deletes the bot's OWN recent tracked messages (owner or group admin).
+    Returns True when the request was handled (caller stops the pipeline)."""
+    low = (text or "").strip()
+    if not low:
+        return False
+    is_cmd = bool(re.match(r"^[!/]?delmy\b", low, re.IGNORECASE))
+    if not is_cmd and not _SELF_DELETE_RE.search(low):
+        return False
+    mid = msg.get("message_id")
+    # Owner always; live group admins too (fail-closed for members).
+    if uid != config.OWNER_CHAT_ID:
+        try:
+            member = tg_api.get_chat_member(chat_id, uid) or {}
+        except Exception:
+            member = {}
+        if member.get("status") not in ("administrator", "creator"):
+            tg_api.send_message(
+                chat_id,
+                "Bhai, ye sirf boss ya admin ke kehne pe karunga 🙂",
+                reply_to_message_id=mid)
+            return True
+    # How many? 'sabhi/sab/saare/all' -> 50, /delmy N -> N, default 20.
+    n = 20
+    if is_cmd:
+        m = re.search(r"^[!/]?delmy\s*(\d{1,3})", low, re.IGNORECASE)
+        n = min(max(int(m.group(1)), 1), 50) if m else 20
+    elif re.search(r"\b(sab|sabhi|saare|sare|all|poore|poora)\b", low,
+                   re.IGNORECASE):
+        n = 50
+    dq = _OWN_MSG_IDS.get(chat_id)
+    ids = list(dq or [])[-n:]
+    if not ids:
+        tg_api.send_message(
+            chat_id,
+            "Abhi mera koi recent message memory me nahi hai jo main delete "
+            "kar sakun — naye messages aate hi clean ho sakte hain.",
+            reply_to_message_id=mid)
+        return True
+    deleted = 0
+    for target in reversed(ids):
+        r = tg_api.delete_message(chat_id, target)
+        if r.get("ok"):
+            deleted += 1
+            try:
+                dq.remove(target)
+            except Exception:
+                pass
+    total = len(ids)
+    if deleted:
+        tg_api.send_message(
+            chat_id,
+            f"🧹 Mere {deleted}/{total} message delete kar diye.",
+            reply_to_message_id=mid)
+    else:
+        tg_api.send_message(
+            chat_id,
+            "🤔 Delete nahi ho paye — shayad 48 ghante se purane ho gaye "
+            "hain, ya Delete Messages permission hat gayi hai.",
+            reply_to_message_id=mid)
+    return True
 
 
 def _link_chat_id(chat_id: int) -> str:
@@ -650,7 +750,10 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
             timeout=config.GATE_TIMEOUT_SECONDS,
         )
     except Exception:
-        return False
+        # v3.3: distinguish 'gate errored' (None) from a clean NO (False).
+        # The caller fails OPEN for the owner — 'kabhi kabhi message bhi
+        # nahi krta' was exactly this: a 429/timeout ate the reply.
+        return None
     return out.strip().upper().startswith("YES")
 
 
@@ -994,13 +1097,14 @@ def handle_message(msg) -> None:
             return
         tg_api.send_chat_action(chat_id, "typing")
         ctx = {"user_id": uid, "chat_id": chat_id, "first_name": user.get("first_name"),
-               "username": user.get("username"), "owner": True, "media": media}
+               "username": user.get("username"), "owner": True,
+               "message_id": msg.get("message_id"), "media": media}
         try:
             res = agent.answer(question, ctx)
         except Exception:
             log("agent.answer failed:", traceback.format_exc())
             res = {"text": None, "grounded": False, "error": "internal"}
-        _deliver_answer(chat_id, res)
+        _deliver_answer(chat_id, res, reply_to=msg.get("message_id"))
         return
 
     # ---------------- group chat ----------------
@@ -1066,6 +1170,11 @@ def handle_message(msg) -> None:
         if moderation.handle_mod_command(msg, uid, chat_id):
             return
 
+        # v3.3: 'apne sabhi message delete kro' / /delmy [N] — the bot
+        # deletes its OWN tracked messages for real (never fake-claimed).
+        if _handle_self_delete(msg, uid, chat_id, text):
+            return
+
         # Standing-rule commands: /yaad (owner), /rules, /bhul (owner).
         if _handle_rule_command(msg, uid, chat_id, text):
             return
@@ -1105,8 +1214,14 @@ def handle_message(msg) -> None:
                 # Everything else: the bot decides itself with the LLM gate
                 # (it sees recent conversation context).
                 who = user.get("first_name") or user.get("username") or "member"
-                if not _should_reply_llm(text, who, chat_id,
-                                         is_owner=(uid == config.OWNER_CHAT_ID)):
+                gate = _should_reply_llm(text, who, chat_id,
+                                         is_owner=(uid == config.OWNER_CHAT_ID))
+                if gate is False:
+                    return  # clean NO — not for the bot
+                # gate is None (gate LLM ERROR): v3.3 — the OWNER never gets
+                # silence on our own infra failure (fail-open for owner;
+                # members stay silent as before).
+                if gate is None and uid != config.OWNER_CHAT_ID:
                     return
             else:
                 prefetch_box = _start_answer_prefetch(text, uid)
@@ -1114,6 +1229,8 @@ def handle_message(msg) -> None:
         # Conversational moderation: members can NEVER trigger actions on
         # their word — only the owner can. The owner's spoken request becomes
         # a REAL command through the same pipeline (never faked).
+        # v3.3: self-delete ('apne message delete karo') is handled EARLIER
+        # (before mod-command synthesis) because its target is the bot itself.
         if _looks_like_mod_request(text):
             mid = msg.get("message_id")
             if uid != config.OWNER_CHAT_ID:
@@ -1169,6 +1286,7 @@ def handle_message(msg) -> None:
                "username": user.get("username"), "group": True, "group_id": chat_id,
                "group_role": _group_role(chat_id, uid),
                "bot_admin": _bot_rights(chat_id),
+               "message_id": msg.get("message_id"),
                "media": media, "recent_log": _recent, "prefetch": prefetch_box}
         try:
             res = agent.answer(question, ctx)
@@ -1196,21 +1314,40 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
     like a human manager would.
     Group me jawab hamesha user ke message ka REPLY hota hai — taaki
     sabko dikhe kis baat ka jawab hai.
+    v3.3: replies render as Telegram RICH TEXT (parse_mode=HTML) —
+    **bold**, `code`, clickable links — with a plain-text fallback so a
+    formatting glitch can never lose a message. Every sent message id is
+    tracked so 'apne message delete karo' really deletes them.
     """
     def _send_and_remember(part: str) -> None:
-        r = tg_api.send_message(chat_id, part,
-                                reply_to_message_id=reply_to)
-        if not r.get("ok"):
-            # reply target gayab ho to plain send (never lose the answer)
-            tg_api.send_message(chat_id, part)
-        # Remember the bot's own message for the reply gate's context.
+        # Rich formatting only when the text actually has markdown/URLs —
+        # plain one-liners go out unchanged (zero risk, zero latency).
+        if fmt.looks_formatted(part):
+            html_part = fmt.markdown_to_html(part)
+            r = tg_api.send_message_html(chat_id, html_part, part,
+                                         reply_to_message_id=reply_to)
+            if not r.get("ok"):
+                # reply target gayab ho to plain send (never lose the answer)
+                r = tg_api.send_message_html(chat_id, html_part, part)
+        else:
+            r = tg_api.send_message(chat_id, part,
+                                    reply_to_message_id=reply_to)
+            if not r.get("ok"):
+                # reply target gayab ho to plain send (never lose the answer)
+                r = tg_api.send_message(chat_id, part)
+        # Remember the bot's own message for context + self-delete (v3.3).
+        _track_own_message(chat_id, r)
         if chat_id and chat_id < 0:
             _remember(chat_id, "RK Manager", part, is_bot=True)
 
     # Interim acknowledgement from a deep-lookup round ("Ruko bhai...").
     interim = (res.get("interim") or "").strip()
     if interim:
-        _send_and_remember(interim)
+        r = tg_api.send_message(chat_id, interim,
+                                reply_to_message_id=reply_to)
+        _track_own_message(chat_id, r)
+        if chat_id and chat_id < 0:
+            _remember(chat_id, "RK Manager", interim, is_bot=True)
         time.sleep(0.4)
 
     text = res.get("text") or ""
@@ -1224,10 +1361,12 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
         _send_and_remember("🤔 Samajh nahi aaya — thoda detail me pucho.")
 
     # If there's a file offer, send it (files, media, contacts — channel se)
-    fo = res.get("file_offer")
-    if fo:
+    # v3.3: delivery REPLY-links to the request and preserves the original
+    # caption's clickable links (forward-first, never truncated).
+    fo = res.get("file_offer") if isinstance(res, dict) else None
+    if isinstance(fo, dict):
         try:
-            agent._deliver_channel_item(chat_id, fo)
+            agent._deliver_channel_item(chat_id, fo, reply_to=reply_to)
         except Exception:
             pass
 

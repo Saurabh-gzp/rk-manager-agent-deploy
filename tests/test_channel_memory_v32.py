@@ -183,12 +183,15 @@ class NameDeliveryTests(IMDBTestCase):
         answer.assert_not_called()
 
     def test_vague_key_request_no_auto_forward(self):
-        """'key dedo' with no specific name = too vague -> no auto-forward."""
+        """'key dedo' with no specific name = too vague -> no auto-forward.
+        v3.3: the LLM IS asked (it should reply 'kis loader ki key?' — the
+        bot must never stay silent on a request), but NO file is delivered
+        because 'key' alone is not a precise match."""
         self._link_channel()
         self._seed_post(245, caption="TRYL KEY", file_name="BEASTCROWN~JAVA.apk")
         fwd, answer = self._run_group("bhai key dedo")
         self.assertEqual(fwd, [])
-        answer.assert_not_called()
+        answer.assert_called_once()
 
     def test_casual_talk_never_auto_forwards(self):
         """No ask ('mujhe crown pasand nahi') -> no delivery, no LLM claim."""

@@ -94,6 +94,37 @@ def ingest_message(msg: dict) -> None:
         print(f"[knowledge] ingest_message failed: {exc!r}", file=__import__("sys").stderr)
 
 
+def _compact_entities(post: dict) -> list[dict]:
+    """Entities of a post (caption_entities for media, entities for text)
+    compacted to {type, offset, length, url?}. The text_link URLs are the
+    REAL targets behind labels like 'KEY: Click me' — without storing them
+    the key is unfixable dead text on any re-delivery. UTF-16 offsets kept
+    as-is (Telegram semantics)."""
+    ents = post.get("caption_entities") or post.get("entities") or []
+    out: list[dict] = []
+    for e in ents:
+        if not isinstance(e, dict) or not e.get("type"):
+            continue
+        item = {"type": e["type"], "offset": e.get("offset") or 0,
+                "length": e.get("length") or 0}
+        if e.get("url"):
+            item["url"] = e["url"]
+        if e.get("user"):
+            item["user"] = {"id": (e["user"] or {}).get("id"),
+                            "username": (e["user"] or {}).get("username")}
+        out.append(item)
+    return out
+
+
+def _entity_link_urls(ents: list[dict]) -> list[str]:
+    """URLs hidden behind text_link labels (e.g. 'Click me' -> key page)."""
+    urls = []
+    for e in ents or []:
+        if isinstance(e, dict) and e.get("type") == "text_link" and e.get("url"):
+            urls.append(str(e["url"]))
+    return urls
+
+
 def ingest_channel_post(post: dict) -> None:
     """Store one channel post. Never raises."""
     try:
@@ -116,7 +147,13 @@ def ingest_channel_post(post: dict) -> None:
             if isinstance(m, dict) and m.get("file_name"):
                 file_name = m["file_name"]
                 break
+        ents = _compact_entities(post)
         links = _URL_RE.findall(text or "")
+        # v3.3: text_link URLs (KEY: Click me -> real key page) join links[]
+        # so search + LLM context can show the REAL clickable target.
+        for u in _entity_link_urls(ents):
+            if u not in links:
+                links.append(u)
         doc = {
             "channel_id": (post.get("chat") or {}).get("id"),
             "message_id": post.get("message_id"),
@@ -126,6 +163,7 @@ def ingest_channel_post(post: dict) -> None:
             "file_type": file_type,
             "file_name": file_name,
             "links": links,
+            "entities": ents,
             "media_group_id": post.get("media_group_id"),
             "contact": contact,
             "date": post.get("date"),
@@ -234,6 +272,8 @@ def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict
             "caption": d.get("caption"), "channel_id": d.get("channel_id"),
             "message_id": d.get("message_id"), "contact": d.get("contact"),
             "file_name": d.get("file_name"),
+            "links": d.get("links") or [],
+            "entities": d.get("entities") or [],
         }
         add(d, "post",
             " ".join(filter(None, [
@@ -257,6 +297,28 @@ def find_file_for(query: str) -> dict | None:
         if h["kind"] == "post" and (h.get("file_id") or h.get("file_type") == "contact"):
             return h
     return None
+
+
+def post_exists(channel_id: int, message_id: int) -> bool:
+    """True when a channel post with this number is really in our records."""
+    if not channel_id or not message_id:
+        return False
+    try:
+        return get_db()["channel_posts"].find_one({
+            "channel_id": channel_id, "message_id": int(message_id)}) is not None
+    except Exception:
+        return False
+
+
+def get_post(channel_id: int, message_id: int) -> dict | None:
+    """Full stored doc for a channel post (or None)."""
+    if not channel_id or not message_id:
+        return None
+    try:
+        return get_db()["channel_posts"].find_one({
+            "channel_id": channel_id, "message_id": int(message_id)})
+    except Exception:
+        return None
 
 
 # --- prune / cleanup ---

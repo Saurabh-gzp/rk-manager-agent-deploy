@@ -32,6 +32,7 @@ BOT_COMMANDS_ADMINS = [
     {"command": "warn", "description": "Warning do (3 par auto-mute)"},
     {"command": "warnings", "description": "Warnings count dekho"},
     {"command": "delete", "description": "Replied message delete karo"},
+    {"command": "delmy", "description": "Bot apne N message delete kare"},
     {"command": "purge", "description": "Bulk delete (reply + count)"},
     {"command": "pin", "description": "Replied message pin karo"},
     {"command": "unpin", "description": "Pinned message unpin karo"},
@@ -69,6 +70,7 @@ HELP_TEXT = (
     "• /warn — 3 warn = 1hr auto-mute\n"
     "• /warnings / /resetwarns\n"
     "• /delete — replied msg delete\n"
+    "• /delmy <i>N</i> — bot apne hi N message delete kare\n"
     "• /purge — spam bulk-clean (reply + count)\n"
     "• /pin / /unpin — messages pin/unpin\n"
     "• /filter &lt;word&gt; — Rose filter: reply karke save, word par content mile\n"

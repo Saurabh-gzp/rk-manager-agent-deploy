@@ -50,6 +50,10 @@ _LINK_PRIVATE_RE = re.compile(
 
 # Generic words that alone must NEVER auto-deliver a post ('key dedo',
 # 'loader de do' = too vague; needs a specific name like crown/beastcrown).
+# v3.3: 'twitter'/'facebook' REMOVED — they are real app names, and the
+# Twitter APK's file_name (com_twitter_android...apkm) matches them
+# precisely (3x weight). The old ban made 'twitter wala app do'
+# un-deliverable — the exact owner complaint.
 _GENERIC_TOKENS = {
     "channel", "post", "message", "msg", "file", "loader", "loadar", "apk",
     "hack", "mod", "game", "gaming", "bhai", "boss", "manager", "bot",
@@ -57,7 +61,8 @@ _GENERIC_TOKENS = {
     "video", "update", "config", "cfg", "kya", "hai", "please", "plz",
     "jaldi", "bro", "rules", "help", "commands", "stats", "telegram",
     "whatsapp", "instagram", "youtube", "spoo", "mujhe", "chahiye",
-    "login", "free", "new", "best", "download", "install",
+    "login", "free", "new", "best", "download", "install", "app",
+    "problem", "fix", "solve", "error", "issue",
     # Hinglish filler — substring false-positive se bachne ke liye
     "koi", "nahi", "nhi", "acha", "accha", "achha", "badiya", "hoon", "hu",
     "raha", "rahe", "rhe", "tha", "thi", "tum", "tera", "mera", "meri",
@@ -134,7 +139,9 @@ def _search_posts_by_tokens(tokens: list[str], channel_id: int,
 _INTENT_RE = re.compile(
     r"\b(forward|forword|forwrd|bhej|bhejo|bhejna|bhejdo|bhej\s?do|bhej\s?dena|"
     r"dedo|de\s?do|dena|dikhao|dikha|dikhana|dikha\s?do|send|nikal|nikaal|"
-    r"nikal\s?do|chahiye|mujhe|mail|mila\s?do|lana|la\s?do|do\s?na)\b",
+    r"nikal\s?do|chahiye|mujhe|mail|mila\s?do|lana|la\s?do|do\s?na)\b"
+    # v3.3: '<thing> do' — 'twitter wala app do', 'key do', 'photo do'
+    r"|\b(app|file|loader|key|link|photo|video|post|cheez|loadar)\s+do\b",
     re.IGNORECASE,
 )
 # STRONG intent — an actual ask for content ('bhejo', 'de do', 'chahiye').
@@ -144,7 +151,11 @@ _STRONG_INTENT_RE = re.compile(
     r"\b(forward|forword|forwrd|bhejo|bhejna|bhejdo|bhej|dedo|de\s?do|"
     r"dikhao|dikha|dikhana|dikha\s?do|send|nikal|nikaal|nikal\s?do|"
     r"chahiye|mila\s?do|lana|la\s?do|pahuncha\w*|mail\s?karo|"
-    r"forward\s?karo|forward\s?krna)\b",
+    r"forward\s?karo|forward\s?krna)\b"
+    # v3.3: 'app do' / 'file do' / 'key do' are STRONG asks — the owner's
+    # 'twitter wala app do konsa hai' must really deliver the APK.
+    r"|\b(app|file|loader|key|link|photo|video|post|cheez|loadar)\s+do\b"
+    r"|\bdo\s?na\b",
     re.IGNORECASE,
 )
 _LATEST_RE = re.compile(
@@ -446,8 +457,13 @@ def handle_forward_request(msg: dict, chat_id: int, uid: int) -> bool:
             # Avoid forwarding when the number is actually a duration etc.
             if not re.search(r"\b(min|minute|ghant|hour|din|day|week|hafte)\b",
                              low):
-                return _forward_post(chat_id, cid, int(num.group(1)), mid,
-                                    f"post #{num.group(1)}")
+                n = int(num.group(1))
+                # v3.3: the number must be a REAL known post — '9999 fix
+                # krne wlaa' me 9999 ek error code hai, post number nahi.
+                from knowledge import post_exists
+                if post_exists(cid, n):
+                    return _forward_post(chat_id, cid, n, mid,
+                                        f"post #{num.group(1)}")
 
     # --- 5. by name ('crown loader de do', 'beastcrown bhejo',
     #     'zyrox photo chahiye') — searches ALL ingested channel posts,

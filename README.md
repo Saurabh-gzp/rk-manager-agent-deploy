@@ -3,6 +3,22 @@
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
 
+## v3.3 POWER AGENT kit (owner request: tools + formatting + intelligence)
+
+Owner ke 5 live issues — root-cause + fix + tests (255 total pass):
+
+| Issue (live) | Root cause | Fix |
+|---|---|---|
+| **"apne sabhi message delete kro" → sirf bola, kiya kuch nahi** | koi self-delete tool hi nahi tha + "delete kro" spelling (`kro`) mod-request regex me missing + "koshish kar raha hu" sanitize se bach gaya | `_track_own_message()` har bheje message ka id yaad rakhta hai; `apne message delete karo` / `/delmy [N]` REAL `deleteMessage` chalata hai (owner/admin only) + honest count report. `_FAKE_PROGRESS_RE` me `koshish kar raha/bata deta` patterns |
+| **Key manga → text + KEY cut** ("cut kr diya text and key") | `file_offer` caption `[:200]` me kata + `sendDocument` by file_id **entities strip kar deta** — "KEY: Click me" ka clickable link (https://t.me/rkgamersfeedback/50) murda text ban gaya | Delivery ab **forward-first** (perfect clone — links clickable, formatting intact) → `copyMessage` fallback → file_id resend LAST with `fmt.entity_html()` se entities HTML me rebuild. Caption KABHI truncate nahi hota. `ingest_channel_post` ab `caption_entities` + text_link URLs store karta hai |
+| **Dumb formatting** — `**asterisks**` literal dikhte the | LLM markdown answers `parse_mode` ke bina jaate the | **fmt.py**: markdown → Telegram HTML (`**bold**`, `` `code` ``, `[label](url)`, underline, strike, auto-linkified URLs) + plain-text fallback; SYSTEM_PROMPT me formatting rules (keys `code` me, file names **bold**, links clickable) |
+| **"twitter wala app do" → sirf file ka NAAM text kiya, app nahi diya** | `twitter` _GENERIC_TOKENS me banned tha + "app do" intent words me nahi tha + gate ne 6 min tak chup rakha | `twitter`/`facebook` un-banned (file_name 3x match precise hai), `app do / key do / X dedo` STRONG intent, `9999` jaise error codes post-number nahi bante, triggers me `app do` = request (gate skip). Owner ka rule "twitter problem → app bhi do" ab sach me deliver hota hai (#197) |
+| **Galat post link (#245 ≠ #197) + free-fire APK + "direct file nahi bhej sakta" jhooth** | LLM post number hallucinate karta tha; file_offer loose match par galat APK deta tha; prompt apni delivery power se contradict karta tha | Context me har post ka **real number + file name + links**; `_ground_post_links()` fabricated link ko REAL post se correct karta hai (+ wo post deliver bhi); `_best_file_offer()` precision gate (file_name/fuzzy token match chahiye — 'arvon' ≈ 'avron' typo bhi chalega); FILE HONESTY prompt ab sach bolta hai |
+
+Bonus: reply-gate ab owner ke liye **fail-open** (429/timeout pe bhi jawab
+milta hai — "kabhi kabhi message bhi nahi krta" fix), `dena/dedo/dijiye`
+request words, `/delmy` command menu me registered.
+
 ## v3.2 CHANNEL MEMORY kit (owner request: old posts + no previews)
 
 Owner ke 3 naye requirements — sab live-verified:

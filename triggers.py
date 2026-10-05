@@ -11,9 +11,15 @@ _QUESTION_START = re.compile(
     re.IGNORECASE,
 )
 _REQUEST_WORD = re.compile(
-    r"\b(?:help|scan|check|status|search|find|explain|batao|bataiye|bata do|"
-    r"samjhao|bhejo|bhej do|send|download|dikhao|show me|are you admin|"
-    r"tum admin|admin ho|admin hai|bot admin)\b",
+    r"\b(?:help|scan|check|status|search|find|explain|batao|bataiye|bata\s?do|"
+    r"samjhao|bhejo|bhej\s?do|bhej\s?dena|send|download|dikhao|show\s?me|are\s?you\s?admin|"
+    r"tum\s?admin|admin\s?ho|admin\s?hai|bot\s?admin)\b"
+    # v3.3: real Hinglish request shapes — 'app do', 'key dedo', 'wala de do',
+    # 'do na' — isse 'are twitter wala app do...' ka direct answer hota hai
+    # (pehle gate chalta tha aur kabhi kabhi chup reh jata tha).
+    r"|\b(?:dedo|de\s?do|dijiye|do\s?na|dena|doooo+)\b"
+    r"|\b(?:app|file|loader|key|link|photo|video|post|cheez|loadar|apkm|apk)\s+"
+    r"(?:do|dena|dedo|de\s?do|dijiye|do\s?na)\b",
     re.IGNORECASE,
 )
 _PLAIN_GREETING = re.compile(
