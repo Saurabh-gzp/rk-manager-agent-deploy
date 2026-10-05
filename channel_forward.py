@@ -26,6 +26,7 @@ actually succeeded; a clear failure reason when it did not.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import links
 import tg_api
@@ -47,11 +48,103 @@ _LINK_PRIVATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Generic words that alone must NEVER auto-deliver a post ('key dedo',
+# 'loader de do' = too vague; needs a specific name like crown/beastcrown).
+_GENERIC_TOKENS = {
+    "channel", "post", "message", "msg", "file", "loader", "loadar", "apk",
+    "hack", "mod", "game", "gaming", "bhai", "boss", "manager", "bot",
+    "latest", "aakhri", "akhri", "naya", "nayi", "key", "link", "photo",
+    "video", "update", "config", "cfg", "kya", "hai", "please", "plz",
+    "jaldi", "bro", "rules", "help", "commands", "stats", "telegram",
+    "whatsapp", "instagram", "youtube", "spoo", "mujhe", "chahiye",
+    "login", "free", "new", "best", "download", "install",
+    # Hinglish filler — substring false-positive se bachne ke liye
+    "koi", "nahi", "nhi", "acha", "accha", "achha", "badiya", "hoon", "hu",
+    "raha", "rahe", "rhe", "tha", "thi", "tum", "tera", "mera", "meri",
+    "apna", "apni", "yahan", "wahan", "kabhi", "sach", "kal", "abhi",
+    "pasand", "wala", "waala", "kaam", "cheez", "dhundo", "dhoondo",
+}
+
+
+def _find_sorted(coll, flt: dict, limit: int = 400,
+                 reverse: bool = True) -> list[dict]:
+    """find + sort by message_id, desc — works on BOTH pymongo cursors
+    and the in-memory fallback (plain lists have no cursor chaining)."""
+    try:
+        cur = coll.find(flt)
+        if hasattr(cur, "limit"):  # pymongo cursor: chain sort+limit
+            cur = cur.sort("message_id", -1 if reverse else 1).limit(limit)
+            return list(cur)
+        docs = list(cur)  # in-memory: already a filtered list
+        docs.sort(key=lambda d: (d.get("message_id") or 0), reverse=reverse)
+        return docs[:limit]
+    except Exception:
+        try:
+            docs = list(coll.find(flt))
+        except Exception:
+            return []
+        docs.sort(key=lambda d: (d.get("message_id") or 0), reverse=reverse)
+        return docs[:limit]
+
+
+def _nfkc(s: str) -> str:
+    """Normalize fullwidth/styled Unicode (ＺＹＲＯＸ -> zyrox) for matching."""
+    return unicodedata.normalize("NFKC", s or "").lower()
+
+
+def _specific_tokens(text: str) -> list[str]:
+    """Search-worthy tokens: len>=3, not generic filler (crown, bat, zyrox...)."""
+    return [w for w in re.findall(r"[A-Za-z0-9_.@#-]+", _nfkc(text))
+            if len(w) >= 3 and w.lower() not in _GENERIC_TOKENS
+            and not w.isdigit()]
+
+
+def _search_posts_by_tokens(tokens: list[str], channel_id: int,
+                             limit: int = 3) -> list[dict]:
+    """Score ALL ingested channel posts by token hits. A hit in the FILE
+    NAME (beastcrown~java.apk) is worth 3x a hit in caption/body text —
+    'twitter apk' must find the Twitter APK, not a loader whose caption
+    merely lists 'login via twitter'. NFKC-normalized so fullwidth
+    (ＺＹＲＯＸ) names still match."""
+    if not tokens or not channel_id:
+        return []
+    docs = _find_sorted(get_db()["channel_posts"],
+                        {"channel_id": channel_id}, limit=400)
+    scored = []
+    for d in docs:
+        fn = _nfkc(d.get("file_name") or "")
+        body = _nfkc(" ".join(filter(None, [
+            d.get("text"), d.get("caption"),
+            " ".join(d.get("links") or []),
+        ])))
+        score = 0
+        for t in tokens:
+            tl = t.lower()
+            if tl in fn:
+                score += 3
+            elif tl in body:
+                score += 1
+        if score:
+            scored.append((score, int(d.get("message_id") or 0), d))
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+    return [d for _, _, d in scored[:limit]]
+
+
 # Forward/deliver intent words (Hinglish + English).
 _INTENT_RE = re.compile(
     r"\b(forward|forword|forwrd|bhej|bhejo|bhejna|bhejdo|bhej\s?do|bhej\s?dena|"
     r"dedo|de\s?do|dena|dikhao|dikha|dikhana|dikha\s?do|send|nikal|nikaal|"
     r"nikal\s?do|chahiye|mujhe|mail|mila\s?do|lana|la\s?do|do\s?na)\b",
+    re.IGNORECASE,
+)
+# STRONG intent — an actual ask for content ('bhejo', 'de do', 'chahiye').
+# 'mujhe'/'mail' jaise weak words yahan nahi — casual talk jaise
+# 'mujhe crown pasand nahi' par kabhi auto-forward nahi hoga.
+_STRONG_INTENT_RE = re.compile(
+    r"\b(forward|forword|forwrd|bhejo|bhejna|bhejdo|bhej|dedo|de\s?do|"
+    r"dikhao|dikha|dikhana|dikha\s?do|send|nikal|nikaal|nikal\s?do|"
+    r"chahiye|mila\s?do|lana|la\s?do|pahuncha\w*|mail\s?karo|"
+    r"forward\s?karo|forward\s?krna)\b",
     re.IGNORECASE,
 )
 _LATEST_RE = re.compile(
@@ -95,30 +188,80 @@ def _forward_post(chat_id: int, from_chat_id: int, message_id: int,
                   reply_to: int | None, label: str = "") -> bool:
     """Actually forward a channel post; always answer honestly.
 
+    The forward itself REPLY to the requester's message (live-verified
+    reply_to_message_id support on forwardMessage) — no extra confirmation
+    noise, the delivery IS the answer. Album posts forward the whole album
+    in order. Only genuine failures produce a spoken reason.
+
     Returns True when the request is fully handled (caller must stop).
     """
+    if _forward_album_aware(chat_id, from_chat_id, message_id, reply_to):
+        return True
     r = tg_api.forward_message(chat_id, from_chat_id, message_id)
     if r.get("ok"):
-        note = "✅ Forward kar diya 📎"
-        if label:
-            note += f" ({label})"
-        _say_reply(chat_id, note, reply_to)
         return True
     desc = str(r.get("description") or "")
-    # Some channels/posts can't be forwarded (restrictions) — try a copy,
-    # which preserves the content even without the 'Forwarded from' header.
-    if "restrictions" in desc.lower() or "not found" not in desc.lower():
-        c = tg_api.copy_message(chat_id, from_chat_id, message_id,
-                                reply_to_message_id=reply_to)
-        if c.get("ok"):
+    low = desc.lower()
+    # reply target vanished mid-flight? retry without the reply linkage
+    if "replied" in low or "reply" in low:
+        r = tg_api.forward_message(chat_id, from_chat_id, message_id)
+        if r.get("ok"):
             return True
-    if "not found" in desc.lower() or "message id" in desc.lower():
+    # restrictions / protected content — try a copy, which preserves content
+    c = tg_api.copy_message(chat_id, from_chat_id, message_id,
+                            reply_to_message_id=reply_to)
+    if c.get("ok"):
+        return True
+    if "not found" in low or "message id" in low:
         _say_reply(chat_id, "❌ Ye post channel me nahi mila — delete ho chuka "
                             "hoga ya number galat hai.", reply_to)
     else:
         _say_reply(chat_id, f"❌ Forward nahi ho paya: {desc or 'unknown error'} "
                             "— bot channel ka admin hona chahiye.", reply_to)
     return True
+
+
+def _forward_album_aware(chat_id: int, from_chat_id: int, message_id: int,
+                         reply_to: int | None) -> bool:
+    """Forward a post; if it belongs to an album, forward the WHOLE album
+    in original order (first one replies to the requester)."""
+    mgid = None
+    try:
+        doc = get_db()["channel_posts"].find_one(
+            {"channel_id": from_chat_id, "message_id": message_id})
+        mgid = (doc or {}).get("media_group_id")
+    except Exception:
+        mgid = None
+    if mgid:
+        try:
+            group = _find_sorted(
+                get_db()["channel_posts"],
+                {"channel_id": from_chat_id, "media_group_id": mgid},
+                limit=10, reverse=False)
+        except Exception:
+            group = []
+        ids = [int(g["message_id"]) for g in group if g.get("message_id")]
+        if 1 < len(ids) <= 10 and message_id in ids:
+            delivered = 0
+            for i, gid in enumerate(ids):
+                r = tg_api.forward_message(
+                    chat_id, from_chat_id, gid,
+                    reply_to_message_id=reply_to if i == 0 else None)
+                if r.get("ok"):
+                    delivered += 1
+            if delivered:
+                return True
+            # every single one failed -> fall through to the plain path
+    r = tg_api.forward_message(chat_id, from_chat_id, message_id,
+                               reply_to_message_id=reply_to)
+    if r.get("ok"):
+        return True
+    low = str(r.get("description") or "").lower()
+    if "reply" in low:  # retried without linkage
+        r = tg_api.forward_message(chat_id, from_chat_id, message_id)
+        if r.get("ok"):
+            return True
+    return False
 
 
 def _resolve_link_source(username: str) -> int | None:
@@ -142,8 +285,8 @@ def _resolve_link_source(username: str) -> int | None:
 def _latest_known_post(channel_id: int) -> int | None:
     """Newest ingested post id for the channel (None when nothing seen)."""
     try:
-        docs = list(get_db()["channel_posts"].find(
-            {"channel_id": channel_id}).sort("message_id", -1).limit(1))
+        docs = _find_sorted(get_db()["channel_posts"],
+                            {"channel_id": channel_id}, limit=1)
         if docs and docs[0].get("message_id"):
             return int(docs[0]["message_id"])
     except Exception:
@@ -152,27 +295,15 @@ def _latest_known_post(channel_id: int) -> int | None:
 
 
 def _search_post_by_name(query: str, channel_id: int) -> int | None:
-    """Find an ingested channel post whose text/caption matches the query."""
-    tokens = [w for w in re.findall(r"[A-Za-z0-9_.-]{3,}", query)
-              if w.lower() not in {
-                  "channel", "se", "bhejo", "bhej", "dedo", "mujhe",
-                  "forward", "karo", "karna", "dikhao", "message", "post",
-                  "msg", "wala", "manager", "bot", "bhai"}]
+    """Find an ingested channel post whose name/file matches the query.
+    Uses specific tokens (crown, beastcrown, zyrox...) — generic words
+    (key/loader/apk) alone never match, so casual talk can't mis-fire."""
+    tokens = _specific_tokens(_strip_intent_words(query))
     if not tokens or not channel_id:
         return None
-    try:
-        rgx = {"$regex": re.escape(tokens[0]), "$options": "i"}
-        docs = list(get_db()["channel_posts"].find(
-            {"$or": [{"text": rgx}, {"caption": rgx}],
-             "channel_id": channel_id}).sort("message_id", -1).limit(3))
-        if len(docs) == 1 and docs[0].get("message_id"):
-            return int(docs[0]["message_id"])
-        for d in docs:
-            text = ((d.get("text") or "") + " " + (d.get("caption") or "")).lower()
-            if all(t.lower() in text for t in tokens):
-                return int(d.get("message_id"))
-    except Exception:
-        pass
+    posts = _search_posts_by_tokens(tokens, channel_id, limit=1)
+    if posts and posts[0].get("message_id"):
+        return int(posts[0]["message_id"])
     return None
 
 
@@ -285,9 +416,13 @@ def handle_forward_request(msg: dict, chat_id: int, uid: int) -> bool:
                 return _forward_post(chat_id, cid, int(num.group(1)), mid,
                                     f"post #{num.group(1)}")
 
-    # --- 5. by name ('channel se beastcrown bhejo') ---
-    if cid and wants and ("channel" in low or "post" in low):
-        post_id = _search_post_by_name(_strip_intent_words(text), cid)
+    # --- 5. by name ('crown loader de do', 'beastcrown bhejo',
+    #     'zyrox photo chahiye') — searches ALL ingested channel posts,
+    #     old ones included. Needs a specific token (crown/beastcrown/...)
+    #     AND strong intent; 'key dedo' alone is too vague and 'mujhe
+    #     crown pasand nahi' has no ask — both fall through to the LLM. ---
+    if cid and _STRONG_INTENT_RE.search(low):
+        post_id = _search_post_by_name(text, cid)
         if post_id:
             return _forward_post(chat_id, cid, post_id, mid)
 
@@ -331,6 +466,10 @@ def handle_get_command(msg: dict, chat_id: int, uid: int) -> bool:
                 {**msg, "text": "forward karo " + arg}, chat_id, uid)
     if re.fullmatch(r"\d{1,6}", arg):
         return _forward_post(chat_id, cid, int(arg), mid, f"post #{arg}")
+    # /get <name> — fuzzy content search ('/get crown', '/get zyrox')
+    post_id = _search_post_by_name(arg, cid)
+    if post_id:
+        return _forward_post(chat_id, cid, post_id, mid, f"{arg}")
     _say_reply(chat_id, "Samajh nahi aaya — post ka number do, t.me link do, "
                         "ya '/get latest' likho.", mid)
     return True

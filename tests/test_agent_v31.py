@@ -97,7 +97,7 @@ class ForwardWiringTests(IMDBTestCase):
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patches[5], \
                 patch.object(bot.tg_api, "forward_message",
-                             side_effect=lambda to, src, mid:
+                             side_effect=lambda to, src, mid, **kw:
                              fwd.append((to, src, mid)) or {"ok": True}) as fw, \
                 patch.object(bot.agent, "answer") as answer:
             bot.handle_message(group_message(
@@ -114,7 +114,7 @@ class ForwardWiringTests(IMDBTestCase):
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patches[5], \
                 patch.object(bot.tg_api, "forward_message",
-                             side_effect=lambda to, src, mid:
+                             side_effect=lambda to, src, mid, **kw:
                              fwd.append((to, src, mid)) or {"ok": True}) as fw, \
                 patch.object(bot.agent, "answer") as answer:
             bot.handle_message(group_message("/get 245"))
@@ -133,7 +133,7 @@ class ForwardWiringTests(IMDBTestCase):
                 patch.object(bot.tg_api, "send_message",
                              return_value={"ok": True}), \
                 patch.object(bot.tg_api, "forward_message",
-                             side_effect=lambda to, src, mid:
+                             side_effect=lambda to, src, mid, **kw:
                              fwd.append((to, src, mid)) or {"ok": True}) as fw, \
                 patch.object(bot.agent, "answer") as answer:
             bot.handle_message(private_message(
@@ -157,7 +157,7 @@ class ForwardWiringTests(IMDBTestCase):
                 patch.object(bot.tg_api, "send_message",
                              return_value={"ok": True}), \
                 patch.object(bot.tg_api, "forward_message",
-                             side_effect=lambda to, src, mid:
+                             side_effect=lambda to, src, mid, **kw:
                              fwd.append((to, src, mid)) or {"ok": True}):
             bot.handle_message(private_message(
                 "ye dekho https://t.me/testchan/300"))
@@ -174,7 +174,7 @@ class ForwardWiringTests(IMDBTestCase):
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patches[5], \
                 patch.object(bot.tg_api, "forward_message",
-                             side_effect=lambda to, src, mid:
+                             side_effect=lambda to, src, mid, **kw:
                              fwd.append((to, src, mid)) or {"ok": True}) as fw, \
                 patch.object(bot.agent, "answer", return_value={
                     "text": "Ye post ka link hai, dekha.", "grounded": True}):

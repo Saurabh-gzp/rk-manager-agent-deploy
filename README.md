@@ -3,6 +3,19 @@
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
 
+## v3.2 CHANNEL MEMORY kit (owner request: old posts + no previews)
+
+Owner ke 3 naye requirements — sab live-verified:
+
+| Requirement | Fix |
+|---|---|
+| **Link preview OFF** in every bot message | `tg_api.send_message` / `edit_messageText` / `copyMessage` ab hamesha `link_preview_options: {is_disabled: true}` bhejte hain (Bot API 7.0+ field, live-verified) |
+| **245 channel messages ka pura data bot ko do** — old posts bot khud dekh nahi sakta | Backfill script: har post id ko silently owner DM me `forwardMessage` karke full content (file_id, file_name, caption, links) padha aur turant delete — **94 live posts MongoDB me ingested** (11 APKs, 39 photos, 6 videos, 32 text posts). Naye posts live ingest hote hain wahi rich schema se |
+| **"crown loader de do" / "key dedo" par post deliver karo** | Name-search delivery: `_search_posts_by_tokens` — file_name hit = 3x weight vs caption hit ('twitter apk' → Twitter APK milega, BEASTCROWN nahi jo caption me twitter likhta hai). NFKC normalization (ＺＹＲＯＸ → zyrox). Specific token + strong intent dono chahiye — 'key dedo' (vague) aur casual talk kabhi auto-forward nahi karta |
+| Forward khud REQUESTER ke message ka REPLY hai | `forwardMessage` me `reply_to_message_id` (live-verified) — delivery wahi jawab hai, koi extra "forward kar diya" noise nahi |
+| Album post manga jaye to poora album | `media_group_id` se group milta hai → saari items order me forward, pehli item requester ko reply karti hai |
+| "abhi system ke zariye forward ho jayega" passive lie | `_FAKE_PROGRESS_RE` me `ho jayega/jayenge` patterns — sentence ship hi nahi hota |
+
 ## v3.0 SPEED kit (reply latency fix)
 
 Replies were taking 15–35s. Root causes (live-measured on the free tiers)

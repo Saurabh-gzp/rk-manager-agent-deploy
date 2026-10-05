@@ -354,7 +354,11 @@ _FAKE_PROGRESS_RE = re.compile(
     r"|pahunch(a|hi)?\s*(deta|deti|dunga|dungi)\b"
     r"|\b(check|dekhe|dekhta|nikal|nikaal|bhej|bhejo|forward|process|"
     r"search|share|download|upload|attach|deliver)\w*\s*"
-    r"(karta|karti|karunga|karungaa|karungi|krunga|krungi|deta|deti|dungi|dunga)\b",
+    r"(karta|karti|karunga|karungaa|karungi|krunga|krungi|deta|deti|dungi|dunga)\b"
+    # v3.2 — 'abhi system ke zariye forward ho jayega' (passive future
+    # promise): delivery verb + 'ho jayega/jayenge' is ALWAYS a fake claim.
+    r"|\b(forward|bhej|send|share|deliver|deliverd|pahunch|nikal|nikaal|mail)\w*\s*ho\s*j+a*y+[ae]+(ga|ge|ng[ae]|ngi)\b"
+    r"|\b(ho\s*j+a*y+[ae]+(ga|ge|ng[ae]|ngi))\b.{0,25}\b(system|bot|main|hum)\b",
     re.IGNORECASE,
 )
 

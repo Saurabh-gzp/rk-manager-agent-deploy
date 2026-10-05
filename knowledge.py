@@ -29,6 +29,9 @@ def _importance(text: str, file_id: str | None, forwarded: bool, is_question: bo
 
 # --- file detection ---
 
+_URL_RE = re.compile(r"https?://[^\s<>()\"']+", re.IGNORECASE)
+
+
 def _extract_file(post: dict) -> tuple[str | None, str | None]:
     for ft in ("document", "video", "audio", "voice", "video_note",
                "animation", "sticker"):
@@ -106,6 +109,14 @@ def ingest_channel_post(post: dict) -> None:
             elif cname:
                 text = f"{text} [contact: {cname}]".strip()
             file_type = "contact"
+        # file_name (e.g. BEASTCROWN~JAVA.apk) + links for name-search
+        file_name = None
+        for ft in ("document", "video", "audio", "animation"):
+            m = post.get(ft)
+            if isinstance(m, dict) and m.get("file_name"):
+                file_name = m["file_name"]
+                break
+        links = _URL_RE.findall(text or "")
         doc = {
             "channel_id": (post.get("chat") or {}).get("id"),
             "message_id": post.get("message_id"),
@@ -113,6 +124,9 @@ def ingest_channel_post(post: dict) -> None:
             "caption": post.get("caption"),
             "file_id": file_id,
             "file_type": file_type,
+            "file_name": file_name,
+            "links": links,
+            "media_group_id": post.get("media_group_id"),
             "contact": contact,
             "date": post.get("date"),
             "forwarded": bool(post.get("forward_from_chat") or post.get("forward_origin")),
@@ -179,7 +193,9 @@ def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict
         qa_flt["user_id"] = user_id
 
     msgs = _fetch(db["messages"], msg_flt)
-    posts = _fetch(db["channel_posts"], {"$or": [{"text": rx}, {"caption": rx}]})
+    posts = _fetch(db["channel_posts"], {
+        "$or": [{"text": rx}, {"caption": rx}, {"file_name": rx},
+                {"links": rx}]})
     qas = _fetch(db["qa"], qa_flt)
 
     lows = [t.casefold() for t in tokens]
@@ -217,8 +233,13 @@ def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict
             "file_id": d.get("file_id"), "file_type": d.get("file_type"),
             "caption": d.get("caption"), "channel_id": d.get("channel_id"),
             "message_id": d.get("message_id"), "contact": d.get("contact"),
+            "file_name": d.get("file_name"),
         }
-        add(d, "post", str(d.get("text", "") or d.get("caption") or ""), row_extra)
+        add(d, "post",
+            " ".join(filter(None, [
+                str(d.get("text", "") or d.get("caption") or ""),
+                str(d.get("file_name") or ""),
+            ])), row_extra)
     for d in qas:
         add(d, "qa", f"Q: {d.get('question','')}\nA: {d.get('answer','')}", {"chat_id": d.get("chat_id")})
 

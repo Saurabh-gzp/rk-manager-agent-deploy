@@ -19,6 +19,11 @@ API_HOST = "https://api.telegram.org"
 API_HOSTNAME = "api.telegram.org"
 MAX_TEXT = 4096
 
+# Owner rule (2026-10-05): link previews OFF in EVERY bot message.
+# link_preview_options is the modern Bot API 7.0+ field; passing it on
+# sendMessage / editMessageText / copyMessage (all verified live).
+NO_PREVIEW = {"is_disabled": True}
+
 # --- persistent connection (keep-alive) ---
 _CONN: http.client.HTTPSConnection | None = None
 _CONN_LOCK = threading.Lock()
@@ -144,8 +149,10 @@ def api(method: str, params: dict | None = None, files: dict | None = None, time
 # ---------------------- Convenience wrappers ----------------------
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None,
-                 disable_web_page_preview=None,
+                 link_preview_options=None,
                  reply_to_message_id=None) -> dict:
+    """Send text. Link preview is ALWAYS disabled unless a caller explicitly
+    passes its own link_preview_options dict (owner rule: preview off)."""
     text = str(text or "")
     chunks = [text[i:i + MAX_TEXT] for i in range(0, max(len(text), 1), MAX_TEXT)]
     first = None
@@ -154,7 +161,7 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None,
             "chat_id": chat_id,
             "text": chunk,
             "parse_mode": parse_mode,
-            "disable_web_page_preview": disable_web_page_preview,
+            "link_preview_options": link_preview_options if link_preview_options is not None else NO_PREVIEW,
             "reply_markup": reply_markup if idx == 0 else None,
             "reply_to_message_id": reply_to_message_id if idx == 0 else None,
         }
@@ -165,12 +172,13 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None,
 
 
 def edit_message_text(chat_id, message_id, text, reply_markup=None,
-                      parse_mode=None) -> dict:
+                      parse_mode=None, link_preview_options=None) -> dict:
     return api("editMessageText", {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
         "parse_mode": parse_mode,
+        "link_preview_options": link_preview_options if link_preview_options is not None else NO_PREVIEW,
         "reply_markup": reply_markup,
     })
 
@@ -285,9 +293,15 @@ def send_chat_action(chat_id, action="typing") -> dict:
     return api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
-def forward_message(to_chat_id, from_chat_id, message_id) -> dict:
+def forward_message(to_chat_id, from_chat_id, message_id,
+                    reply_to_message_id=None,
+                    disable_notification=None) -> dict:
+    """Forward with optional reply linkage (live-verified on current API)."""
     return api("forwardMessage", {
-        "chat_id": to_chat_id, "from_chat_id": from_chat_id, "message_id": message_id,
+        "chat_id": to_chat_id, "from_chat_id": from_chat_id,
+        "message_id": message_id,
+        "reply_to_message_id": reply_to_message_id,
+        "disable_notification": disable_notification,
     })
 
 
@@ -417,12 +431,16 @@ def send_any_file(chat_id: int, file_id: str, file_type: str,
 # ---------------------- Power upgrade additions ----------------------
 
 def copy_message(to_chat_id, from_chat_id, message_id, caption=None,
-                 reply_to_message_id=None) -> dict:
-    """Copy a message without the 'Forwarded from' header (as-is clone)."""
+                 reply_to_message_id=None,
+                 disable_notification=None) -> dict:
+    """Copy a message without the 'Forwarded from' header (as-is clone).
+    Link preview stays off for copied text (owner rule)."""
     return api("copyMessage", {
         "chat_id": to_chat_id, "from_chat_id": from_chat_id,
         "message_id": message_id, "caption": caption,
         "reply_to_message_id": reply_to_message_id,
+        "disable_notification": disable_notification,
+        "link_preview_options": NO_PREVIEW,
     })
 
 

@@ -292,16 +292,19 @@ def list_channel_files(query: str | None = None) -> list[dict]:
             import re as _re
             rgx = {"$regex": _re.escape(query), "$options": "i"}
             flt = {"$or": [{"text": rgx, "file_id": {"$ne": None}},
-                           {"caption": rgx, "file_id": {"$ne": None}}]}
+                           {"caption": rgx, "file_id": {"$ne": None}},
+                           {"file_name": rgx, "file_id": {"$ne": None}}]}
         docs = list(posts.find(flt))
     except Exception:
         return []
-    docs.sort(key=lambda d: d.get("date") or 0, reverse=True)
+    docs.sort(key=lambda d: (d.get("date") or 0), reverse=True)
     items = []
     for d in docs:
-        label = (d.get("caption") or d.get("text") or "").strip()
-        if len(label) > 40:
-            label = label[:37] + "..."
+        label = (d.get("file_name") or "").strip()
+        if not label:
+            label = (d.get("caption") or d.get("text") or "").strip()
+            if len(label) > 40:
+                label = label[:37] + "..."
         if not label:
             label = f"file (msg {d.get('message_id')})"
         items.append({"label": label, "type": d.get("file_type") or "document",

@@ -269,9 +269,13 @@ class PrefetchTests(unittest.TestCase):
                 patch.object(bot.community, "community_block",
                              return_value="F"):
             box = bot._start_answer_prefetch("loader update", 1)
-            # give the daemon thread a moment
-            for _ in range(100):
-                if box.get("hits") is not None:
+            # give the daemon thread a moment — wait for ALL THREE keys,
+            # not just hits (the box fills sequentially; checking standing
+            # right after hits wins the race only sometimes).
+            for _ in range(300):
+                if (box.get("hits") is not None
+                        and box.get("standing") is not None
+                        and box.get("facts") is not None):
                     break
                 import time as _t
                 _t.sleep(0.01)
