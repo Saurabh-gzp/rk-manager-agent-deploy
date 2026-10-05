@@ -53,13 +53,13 @@ class IMDBTestCase(unittest.TestCase):
         self.p_owner.start()
         channel_forward._LAST_LINK.clear()
         bot._GROUP_CONTEXT.clear()
-        bot._OWN_MSG_IDS.clear()
+        tg_api.OWN_MSG_IDS.clear()
         self.addCleanup(self.p_db.stop)
         self.addCleanup(self.p_owner.stop)
         self.addCleanup(db.invalidate_state_cache)
         self.addCleanup(channel_forward._LAST_LINK.clear)
         self.addCleanup(bot._GROUP_CONTEXT.clear)
-        self.addCleanup(bot._OWN_MSG_IDS.clear)
+        self.addCleanup(tg_api.OWN_MSG_IDS.clear)
 
     def _link_channel(self, username="testchan"):
         db.save_state("channel_id", CHAN)
@@ -302,8 +302,7 @@ class TwitterDeliveryTests(IMDBTestCase):
 # ---------------------------------------------------------------------------
 class SelfDeleteTests(IMDBTestCase):
     def test_apne_sabhi_message_delete_kro(self):
-        bot._OWN_MSG_IDS[CHAT] = __import__("collections").deque(
-            [11, 12, 13, 14], maxlen=200)
+        tg_api.OWN_MSG_IDS[CHAT].extend([11, 12, 13, 14])
         deleted = []
         with patch.object(bot.links, "is_managed_group", return_value=True), \
                 patch.object(bot.moderation, "handle_group_message",
@@ -319,11 +318,10 @@ class SelfDeleteTests(IMDBTestCase):
                               user_id=OWNER, message_id=99))
         self.assertEqual(sorted(deleted), [11, 12, 13, 14])
         self.assertIn("4", sm.call_args_list[-1][0][1])  # honest count
-        self.assertEqual(len(bot._OWN_MSG_IDS[CHAT]), 0)
+        self.assertEqual(len(tg_api.OWN_MSG_IDS[CHAT]), 0)
 
     def test_delmy_command_with_count(self):
-        bot._OWN_MSG_IDS[CHAT] = __import__("collections").deque(
-            [21, 22, 23, 24, 25], maxlen=200)
+        tg_api.OWN_MSG_IDS[CHAT].extend([21, 22, 23, 24, 25])
         deleted = []
         with patch.object(bot.links, "is_managed_group", return_value=True), \
                 patch.object(bot.moderation, "handle_group_message",
@@ -338,8 +336,7 @@ class SelfDeleteTests(IMDBTestCase):
         self.assertEqual(deleted, [25, 24])  # newest first, exactly 2
 
     def test_member_cannot_self_delete_bot_messages(self):
-        bot._OWN_MSG_IDS[CHAT] = __import__("collections").deque(
-            [31, 32], maxlen=200)
+        tg_api.OWN_MSG_IDS[CHAT].extend([31, 32])
         with patch.object(bot.links, "is_managed_group", return_value=True), \
                 patch.object(bot.moderation, "handle_group_message",
                              return_value=False), \
@@ -354,12 +351,15 @@ class SelfDeleteTests(IMDBTestCase):
         dm.assert_not_called()
         self.assertIn("boss", sm.call_args_list[-1][0][1])
 
-    def test_track_own_message_records_ids(self):
-        bot._track_own_message(CHAT, {"ok": True, "result": {"message_id": 77}})
-        self.assertEqual(list(bot._OWN_MSG_IDS[CHAT]), [77])
-        bot._track_own_message(CHAT, {"ok": False})
-        bot._track_own_message(CHAT, None)
-        self.assertEqual(list(bot._OWN_MSG_IDS[CHAT]), [77])
+    def test_send_tracking_records_group_ids_only(self):
+        tg_api.OWN_MSG_IDS.clear()
+        with patch.object(tg_api, "api",
+                          return_value={"ok": True, "result": {"message_id": 77}}):
+            tg_api.send_message(CHAT, "hello")      # group -> tracked
+            tg_api.send_message(8967004608, "dm")    # DM -> not tracked
+            tg_api.forward_message_tracked(CHAT, -100777, 5)  # forward tracked
+        self.assertEqual(list(tg_api.OWN_MSG_IDS[CHAT]), [77, 77])
+        self.assertNotIn(8967004608, tg_api.OWN_MSG_IDS)
 
     def test_delete_kro_is_mod_request(self):
         self.assertTrue(bot._looks_like_mod_request(
@@ -600,10 +600,10 @@ class RichAnswerDeliveryTests(IMDBTestCase):
         sh.assert_not_called()
 
     def test_own_message_ids_tracked(self):
-        with patch.object(tg_api, "send_message",
+        with patch.object(tg_api, "api",
                           return_value={"ok": True, "result": {"message_id": 55}}):
             bot._deliver_answer(CHAT, {"text": "theek hai boss"}, reply_to=9)
-        self.assertEqual(list(bot._OWN_MSG_IDS[CHAT]), [55])
+        self.assertEqual(list(tg_api.OWN_MSG_IDS[CHAT]), [55])
 
 
 class NumberPostGuardTests(IMDBTestCase):

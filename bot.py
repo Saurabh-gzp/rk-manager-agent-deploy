@@ -186,27 +186,11 @@ def _looks_like_mod_request(text: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # v3.3 — SELF-MESSAGE DELETION ('apne sabhi message delete kro' + /delmy).
-# The owner orders the bot to clean up ITS OWN recent messages; every
-# message the bot sends is id-tracked, so this deletes for REAL (the old
-# bot just said 'koshish kar raha hu' and did nothing).
+# The owner orders the bot to clean up ITS OWN recent messages. Every
+# message the bot sends to a group (texts AND file forwards — tracked in
+# tg_api.OWN_MSG_IDS) is deleted for REAL; the old bot just said
+# 'koshish kar raha hu' and did nothing.
 # ---------------------------------------------------------------------------
-_OWN_MSG_IDS: dict[int, deque] = {}
-
-
-def _track_own_message(chat_id: int, r: dict | None) -> None:
-    """Remember the id of every message WE send (for /delmy). Never raises."""
-    try:
-        if not r or not r.get("ok") or not chat_id:
-            return
-        mid = (r.get("result") or {}).get("message_id")
-        if mid:
-            dq = _OWN_MSG_IDS.get(chat_id)
-            if dq is None:
-                dq = deque(maxlen=200)
-                _OWN_MSG_IDS[chat_id] = dq
-            dq.append(int(mid))
-    except Exception:
-        pass
 
 
 _SELF_DELETE_RE = re.compile(
@@ -248,7 +232,7 @@ def _handle_self_delete(msg: dict, uid: int, chat_id: int, text: str) -> bool:
     elif re.search(r"\b(sab|sabhi|saare|sare|all|poore|poora)\b", low,
                    re.IGNORECASE):
         n = 50
-    dq = _OWN_MSG_IDS.get(chat_id)
+    dq = tg_api.OWN_MSG_IDS.get(chat_id)
     ids = list(dq or [])[-n:]
     if not ids:
         tg_api.send_message(
@@ -1335,17 +1319,16 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
             if not r.get("ok"):
                 # reply target gayab ho to plain send (never lose the answer)
                 r = tg_api.send_message(chat_id, part)
-        # Remember the bot's own message for context + self-delete (v3.3).
-        _track_own_message(chat_id, r)
+        # Remember the bot's own message for context (ids auto-tracked in
+        # tg_api.OWN_MSG_IDS for /delmy self-delete).
         if chat_id and chat_id < 0:
             _remember(chat_id, "RK Manager", part, is_bot=True)
 
     # Interim acknowledgement from a deep-lookup round ("Ruko bhai...").
     interim = (res.get("interim") or "").strip()
     if interim:
-        r = tg_api.send_message(chat_id, interim,
-                                reply_to_message_id=reply_to)
-        _track_own_message(chat_id, r)
+        tg_api.send_message(chat_id, interim,
+                            reply_to_message_id=reply_to)
         if chat_id and chat_id < 0:
             _remember(chat_id, "RK Manager", interim, is_bot=True)
         time.sleep(0.4)

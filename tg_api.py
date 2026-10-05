@@ -14,6 +14,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import defaultdict, deque
 
 API_HOST = "https://api.telegram.org"
 API_HOSTNAME = "api.telegram.org"
@@ -148,6 +149,38 @@ def api(method: str, params: dict | None = None, files: dict | None = None, time
 
 # ---------------------- Convenience wrappers ----------------------
 
+# v3.3 — ids of every message WE send to a GROUP, so 'apne sabhi message
+# delete kro' / /delmy can really delete them (texts AND file forwards).
+OWN_MSG_IDS: dict = defaultdict(lambda: deque(maxlen=300))
+
+
+def _track_sent(chat_id, r: dict | None) -> None:
+    """Remember the id of a message we just sent to a group. Never raises."""
+    try:
+        if not isinstance(chat_id, int) or chat_id >= 0:
+            return  # groups only
+        if not r or not r.get("ok"):
+            return
+        mid = (r.get("result") or {}).get("message_id")
+        if mid:
+            OWN_MSG_IDS[chat_id].append(int(mid))
+    except Exception:
+        pass
+
+
+def _track_sent_many(chat_id, r: dict | None) -> None:
+    """sendMediaGroup returns {result: [Message, ...]} — track them all."""
+    try:
+        if not isinstance(chat_id, int) or chat_id >= 0 or not r or not r.get("ok"):
+            return
+        for m in (r.get("result") or []):
+            mid = (m or {}).get("message_id")
+            if mid:
+                OWN_MSG_IDS[chat_id].append(int(mid))
+    except Exception:
+        pass
+
+
 def send_message(chat_id, text, reply_markup=None, parse_mode=None,
                  link_preview_options=None,
                  reply_to_message_id=None) -> dict:
@@ -168,6 +201,7 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None,
         r = api("sendMessage", p)
         if idx == 0:
             first = r
+    _track_sent(chat_id, first)
     return first or {}
 
 
@@ -321,6 +355,17 @@ def forward_message(to_chat_id, from_chat_id, message_id,
     })
 
 
+def forward_message_tracked(to_chat_id, from_chat_id, message_id,
+                            reply_to_message_id=None,
+                            disable_notification=False) -> dict:
+    """forwardMessage + own-id tracking (self-delete covers forwards too)."""
+    r = forward_message(to_chat_id, from_chat_id, message_id,
+                        reply_to_message_id=reply_to_message_id,
+                        disable_notification=disable_notification)
+    _track_sent(to_chat_id, r)
+    return r
+
+
 def send_document(chat_id, file_id_or_path, caption=None,
                   reply_to_message_id=None, parse_mode=None) -> dict:
     if isinstance(file_id_or_path, str) and file_id_or_path.startswith("@"):
@@ -331,33 +376,40 @@ def send_document(chat_id, file_id_or_path, caption=None,
         except OSError as e:
             return {"ok": False, "description": f"cannot read file: {e}"}
         filename = path.rsplit("/", 1)[-1] or "document"
-        return api(
+        r = api(
             "sendDocument",
             {"chat_id": chat_id, "caption": caption,
              "parse_mode": parse_mode,
              "reply_to_message_id": reply_to_message_id},
             files={"document": (filename, data, "application/octet-stream")},
         )
-    return api("sendDocument", {"chat_id": chat_id, "document": file_id_or_path,
-                                 "caption": caption,
-                                 "parse_mode": parse_mode,
-                                 "reply_to_message_id": reply_to_message_id})
+    else:
+        r = api("sendDocument", {"chat_id": chat_id, "document": file_id_or_path,
+                                  "caption": caption,
+                                  "parse_mode": parse_mode,
+                                  "reply_to_message_id": reply_to_message_id})
+    _track_sent(chat_id, r)
+    return r
 
 
 def send_photo(chat_id, file_id, caption=None,
                reply_to_message_id=None, parse_mode=None) -> dict:
-    return api("sendPhoto", {"chat_id": chat_id, "photo": file_id,
-                             "caption": caption,
-                             "parse_mode": parse_mode,
-                             "reply_to_message_id": reply_to_message_id})
+    r = api("sendPhoto", {"chat_id": chat_id, "photo": file_id,
+                          "caption": caption,
+                          "parse_mode": parse_mode,
+                          "reply_to_message_id": reply_to_message_id})
+    _track_sent(chat_id, r)
+    return r
 
 
 def send_video(chat_id, file_id, caption=None,
                reply_to_message_id=None, parse_mode=None) -> dict:
-    return api("sendVideo", {"chat_id": chat_id, "video": file_id,
-                             "caption": caption,
-                             "parse_mode": parse_mode,
-                             "reply_to_message_id": reply_to_message_id})
+    r = api("sendVideo", {"chat_id": chat_id, "video": file_id,
+                          "caption": caption,
+                          "parse_mode": parse_mode,
+                          "reply_to_message_id": reply_to_message_id})
+    _track_sent(chat_id, r)
+    return r
 
 
 def send_audio(chat_id, file_id, caption=None,
@@ -396,10 +448,12 @@ def send_video_note(chat_id, file_id, reply_to_message_id=None) -> dict:
 def send_media_group(chat_id, media: list,
                      reply_to_message_id=None) -> dict:
     """Send 2-10 photo/video/document/audio items as one grouped album."""
-    return api("sendMediaGroup", {
+    r = api("sendMediaGroup", {
         "chat_id": chat_id, "media": media,
         "reply_to_message_id": reply_to_message_id,
     })
+    _track_sent_many(chat_id, r)
+    return r
 
 
 def leave_chat(chat_id) -> dict:
@@ -463,13 +517,15 @@ def copy_message(to_chat_id, from_chat_id, message_id, caption=None,
                  disable_notification=None) -> dict:
     """Copy a message without the 'Forwarded from' header (as-is clone).
     Link preview stays off for copied text (owner rule)."""
-    return api("copyMessage", {
+    r = api("copyMessage", {
         "chat_id": to_chat_id, "from_chat_id": from_chat_id,
         "message_id": message_id, "caption": caption,
         "reply_to_message_id": reply_to_message_id,
         "disable_notification": disable_notification,
         "link_preview_options": NO_PREVIEW,
     })
+    _track_sent(to_chat_id, r)
+    return r
 
 
 def pin_chat_message(chat_id, message_id, silent=True) -> dict:

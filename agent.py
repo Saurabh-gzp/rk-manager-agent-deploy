@@ -766,9 +766,11 @@ def _deliver_channel_item(chat_id: int, item: dict,
     ch = item.get("channel_id") or links.get_channel_id()
     mid = item.get("message_id")
     # 1-2. forward / copy from the live channel — entities survive intact
+    # (forward_message_tracked: the delivery counts as OUR message, so
+    # 'apne message delete karo' can clean it up too)
     if ch and mid:
-        r = tg_api.forward_message(chat_id, ch, mid,
-                                   reply_to_message_id=reply_to)
+        r = tg_api.forward_message_tracked(chat_id, ch, mid,
+                                           reply_to_message_id=reply_to)
         if r.get("ok"):
             return r
         r = tg_api.copy_message(chat_id, ch, mid,

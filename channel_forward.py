@@ -241,14 +241,14 @@ def _forward_post(chat_id: int, from_chat_id: int, message_id: int,
         # copy failed (e.g. protected content) -> forward as fallback
     if _forward_album_aware(chat_id, from_chat_id, message_id, reply_to):
         return True
-    r = tg_api.forward_message(chat_id, from_chat_id, message_id)
+    r = tg_api.forward_message_tracked(chat_id, from_chat_id, message_id)
     if r.get("ok"):
         return True
     desc = str(r.get("description") or "")
     low = desc.lower()
     # reply target vanished mid-flight? retry without the reply linkage
     if "replied" in low or "reply" in low:
-        r = tg_api.forward_message(chat_id, from_chat_id, message_id)
+        r = tg_api.forward_message_tracked(chat_id, from_chat_id, message_id)
         if r.get("ok"):
             return True
     # restrictions / protected content — try a copy, which preserves content
@@ -288,7 +288,7 @@ def _forward_album_aware(chat_id: int, from_chat_id: int, message_id: int,
         if 1 < len(ids) <= 10 and message_id in ids:
             delivered = 0
             for i, gid in enumerate(ids):
-                r = tg_api.forward_message(
+                r = tg_api.forward_message_tracked(
                     chat_id, from_chat_id, gid,
                     reply_to_message_id=reply_to if i == 0 else None)
                 if r.get("ok"):
@@ -296,13 +296,13 @@ def _forward_album_aware(chat_id: int, from_chat_id: int, message_id: int,
             if delivered:
                 return True
             # every single one failed -> fall through to the plain path
-    r = tg_api.forward_message(chat_id, from_chat_id, message_id,
+    r = tg_api.forward_message_tracked(chat_id, from_chat_id, message_id,
                                reply_to_message_id=reply_to)
     if r.get("ok"):
         return True
     low = str(r.get("description") or "").lower()
     if "reply" in low:  # retried without linkage
-        r = tg_api.forward_message(chat_id, from_chat_id, message_id)
+        r = tg_api.forward_message_tracked(chat_id, from_chat_id, message_id)
         if r.get("ok"):
             return True
     return False
