@@ -157,6 +157,8 @@ _NUM_POST_RE = re.compile(
     r"#?(\d{1,6})\s*(?:wala|waala|wala hi|number\s?wala|no\.?\s?wala)?",
     re.IGNORECASE,
 )
+# URL-ish text (used to detect posts whose FORWARD would carry a preview)
+_URLISH_RE = re.compile(r"https?://|t\.me/|telegram\.me/|youtu\.?be", re.IGNORECASE)
 
 
 def _managed_channel_username() -> str:
@@ -184,6 +186,28 @@ def _remember_link(chat_id: int, channel_id: int, message_id: int) -> None:
         _LAST_LINK[chat_id] = (channel_id, int(message_id))
 
 
+def _needs_preview_kill(doc: dict) -> bool:
+    """Owner rule: link preview OFF in every bot message. A forwarded TEXT
+    post carries the original's preview (live-proven, and forwards cannot
+    be edited) — so text-with-URL posts must deliver via copyMessage.
+    Media captions never generate previews; contacts have no text body."""
+    if not doc:
+        return False
+    if doc.get("file_id") or doc.get("file_type"):  # media / contact
+        return False
+    if doc.get("links"):
+        return True
+    return bool(_URLISH_RE.search(str(doc.get("text") or "")))
+
+
+def _get_post_doc(from_chat_id: int, message_id: int) -> dict:
+    try:
+        return get_db()["channel_posts"].find_one(
+            {"channel_id": from_chat_id, "message_id": message_id}) or {}
+    except Exception:
+        return {}
+
+
 def _forward_post(chat_id: int, from_chat_id: int, message_id: int,
                   reply_to: int | None, label: str = "") -> bool:
     """Actually forward a channel post; always answer honestly.
@@ -191,10 +215,19 @@ def _forward_post(chat_id: int, from_chat_id: int, message_id: int,
     The forward itself REPLY to the requester's message (live-verified
     reply_to_message_id support on forwardMessage) — no extra confirmation
     noise, the delivery IS the answer. Album posts forward the whole album
-    in order. Only genuine failures produce a spoken reason.
+    in order. Text posts containing a URL deliver via copyMessage so the
+    link preview stays OFF (forwardMessage copies the original's preview
+    and Telegram refuses to edit forwarded messages). Only genuine
+    failures produce a spoken reason.
 
     Returns True when the request is fully handled (caller must stop).
     """
+    if _needs_preview_kill(_get_post_doc(from_chat_id, message_id)):
+        c = tg_api.copy_message(chat_id, from_chat_id, message_id,
+                                reply_to_message_id=reply_to)
+        if c.get("ok"):
+            return True
+        # copy failed (e.g. protected content) -> forward as fallback
     if _forward_album_aware(chat_id, from_chat_id, message_id, reply_to):
         return True
     r = tg_api.forward_message(chat_id, from_chat_id, message_id)

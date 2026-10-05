@@ -232,6 +232,96 @@ class NameDeliveryTests(IMDBTestCase):
         self.assertEqual(fwd[0][2], 238)
 
 
+class PreviewKillOnForwardTests(IMDBTestCase):
+    """v3.2.1: forwarded TEXT posts with URLs carry the original's link
+    preview (live-proven) and forwards can't be edited — so they deliver
+    via copyMessage (link_preview_options OFF). Media/text-without-URL
+    posts keep the normal forwardMessage path."""
+
+    def _run_delivery(self, text, seed=None):
+        fwd, copies = [], []
+        if seed:
+            seed()
+        with patch.object(bot.links, "is_managed_group", return_value=True), \
+                patch.object(bot.moderation, "handle_group_message",
+                             return_value=False), \
+                patch.object(bot.knowledge, "ingest_message"), \
+                patch.object(bot, "_bot_username", return_value="rk_test_bot"), \
+                patch.object(bot.tg_api, "send_chat_action"), \
+                patch.object(bot.tg_api, "send_message",
+                             return_value={"ok": True}), \
+                patch.object(bot.tg_api, "forward_message",
+                             side_effect=lambda to, src, mid, **kw:
+                             fwd.append((mid, kw)) or {"ok": True}), \
+                patch.object(bot.tg_api, "copy_message",
+                             side_effect=lambda to, src, mid, **kw:
+                             copies.append((mid, kw)) or {"ok": True}), \
+                patch.object(bot.agent, "answer"):
+            bot.handle_message(group_message(text))
+        return fwd, copies
+
+    def test_text_post_with_url_delivered_via_copy(self):
+        """'tempmail wala post bhejo' -> #179 (text: https://tempmail.ninja/)
+        must COPY (preview off), not forward (preview on)."""
+        self._link_channel()
+        self._seed_post(179, text="Use this TempMail https://tempmail.ninja/",
+                        file_id=None, file_type=None)
+        fwd, copies = self._run_delivery("tempmail wala post bhejo")
+        self.assertEqual(copies, [(179, {"reply_to_message_id": 99})])
+        self.assertEqual(fwd, [])
+
+    def test_youtube_post_delivered_via_copy(self):
+        self._link_channel()
+        self._seed_post(237, text="https://youtu.be/ffN7dRrUAUU",
+                        file_id=None, file_type=None)
+        fwd, copies = self._run_delivery("237 wala post bhejo")
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0][0], 237)
+
+    def test_media_post_still_forwarded(self):
+        """APK post (file) with links in caption: captions never preview —
+        keep the forwardMessage path (with 'Forwarded from' header)."""
+        self._link_channel()
+        self._seed_post(245, caption="TRYL KEY https://spoo.me/Y5p4T1",
+                        file_name="BEASTCROWN~JAVA.apk", file_type="document")
+        fwd, copies = self._run_delivery("beastcrown bhejo")
+        self.assertEqual(len(fwd), 1)
+        self.assertEqual(fwd[0][0], 245)
+        self.assertEqual(copies, [])
+
+    def test_plain_text_post_still_forwarded(self):
+        self._link_channel()
+        self._seed_post(99, text="No reaction no key",
+                        file_id=None, file_type=None)
+        fwd, copies = self._run_delivery("99 wala post bhejo")
+        self.assertEqual(len(fwd), 1)
+        self.assertEqual(copies, [])
+
+    def test_copy_failure_falls_back_to_forward(self):
+        self._link_channel()
+        self._seed_post(179, text="Use this TempMail https://tempmail.ninja/",
+                        file_id=None, file_type=None)
+        fwd, copies = [], []
+        with patch.object(bot.links, "is_managed_group", return_value=True), \
+                patch.object(bot.moderation, "handle_group_message",
+                             return_value=False), \
+                patch.object(bot.knowledge, "ingest_message"), \
+                patch.object(bot, "_bot_username", return_value="rk_test_bot"), \
+                patch.object(bot.tg_api, "send_chat_action"), \
+                patch.object(bot.tg_api, "send_message",
+                             return_value={"ok": True}), \
+                patch.object(bot.tg_api, "copy_message",
+                             return_value={"ok": False,
+                                           "description": "protected"}), \
+                patch.object(bot.tg_api, "forward_message",
+                             side_effect=lambda to, src, mid, **kw:
+                             fwd.append((mid, kw)) or {"ok": True}), \
+                patch.object(bot.agent, "answer"):
+            bot.handle_message(group_message("tempmail wala post bhejo"))
+        self.assertEqual(len(fwd), 1)  # forward fallback fired
+        self.assertEqual(fwd[0][0], 179)
+
+
 class SanitizeHoJayegaTests(unittest.TestCase):
     """v3.2: 'abhi system ke zariye forward ho jayega' class of lies."""
 
