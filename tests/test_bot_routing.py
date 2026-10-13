@@ -28,6 +28,15 @@ def private_message(text, user_id=123):
 
 
 class BotRoutingTests(unittest.TestCase):
+    def setUp(self):
+        # v4.0: budget/min-gap state across tests isolate karo (undirected
+        # replies ab timestamps track karte hain — stale entries bina clear
+        # ke agle test ka reply min-gap se block kar dete hain)
+        bot._REPLY_TIMES.clear()
+        bot._GROUP_CONTEXT.clear()
+        self.addCleanup(bot._REPLY_TIMES.clear)
+        self.addCleanup(bot._GROUP_CONTEXT.clear)
+
     def _base_patches(self):
         return (
             patch.object(bot.links, "is_managed_group", return_value=True),

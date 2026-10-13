@@ -16,6 +16,7 @@ import knowledge
 import links
 import rules
 import tg_api
+import verify  # v4.0 TRUTH LAYER
 
 
 # The bot's real moderation powers. Stated in the prompt so the model never
@@ -113,6 +114,14 @@ SYSTEM_PROMPT = (
     "NEVER write 'file bhej di / bhej raha hu / file ready hai / forward "
     "kar diya' as YOUR OWN action, and NEVER say you CANNOT deliver "
     "files — the system can and does. "
+    "NO UNREQUESTED CONTENT (CRITICAL — v4.0): NEVER volunteer a key, "
+    "password, code, file, APK or link the user did NOT ask for. Read "
+    "the question carefully: if the user asked about topic X, answer "
+    "ONLY about X. Do NOT dump keys/codes/links of topic Y just because "
+    "they appear in your context — that is exactly the 'BAT key nobody "
+    "asked for' bug. Mentioning that another thing EXISTS (by name, no "
+    "key/code) is fine only when directly helpful; sharing its actual "
+    "key/code/link unprompted is FORBIDDEN. "
     "POST NUMBERS (CRITICAL): channel posts in your context carry their "
     "REAL number, like (channel post #197; file: com_twitter_android..."
     "apkm). When pointing the user to a post, use ONLY numbers that "
@@ -701,6 +710,59 @@ def sanitize_claims(text: str | None) -> str | None:
     return out or None
 
 
+# v4.0 — unrequested key/password guard ('mene aisa to bola hi nhi ki
+# mujhe BAT ka key chahiye'). Key/password VALUE lines jab allow hain:
+#   - question me khud key/password/pass intent hai (\bkey\b, password...),
+#   - YA key-line ka topic question ke tokens se match karta hai.
+# Warna line strip — bot ne 'mangne ke bina' secret dump kar diya.
+_KEY_LINE_RE = re.compile(
+    r"(?i)^\W{0,4}(?:\**\s*)?(key|password|pass|otp|code|pin)\s*(?:\**)?\s*[:\-\u2013=]\s*.+$"
+)
+_QUESTION_KEY_INTENT_RE = re.compile(
+    r"(?i)\b(?:key|keys|password|pass\s?word|passcode|pass\b|otp|pin|code)\b"
+)
+_QSTOP = {
+    "key", "keys", "ka", "ki", "ke", "the", "a", "an", "the", "is", "are",
+    "kya", "hai", "hain", "konsa", "konsi", "wala", "waala", "me", "mein",
+    "se", "do", "de", "dedo", "dena", "batao", "bata", "bhai", "boss",
+    "bro", "mujhe", "chahiye", "kaise", "kaha", "kahaan", "milega", "password",
+    "pass", "code", "otp", "pin", "number", "latest", "naya", "app", "file",
+    "loader", "apk", "apkm", "link", "post",
+}
+
+
+def sanitize_unrequested_keys(text: str | None, question: str) -> str | None:
+    """v4.0: strip key/password VALUE lines the user never asked for.
+
+    Sirf tab fire hota hai jab: (a) answer me koi 'KEY: xxx' style value
+    line ho, (b) question me key-intent na ho, (c) key-line ka topic bhi
+    question me na ho. Teeno conditions ke bina kuch nahi kata jaata —
+    legit 'BAT ka key batao' jawab kabhi affect nahi hota.
+    """
+    if not text:
+        return text
+    key_lines = [ln for ln in text.splitlines() if _KEY_LINE_RE.match(ln.strip())]
+    if not key_lines:
+        return text
+    if _QUESTION_KEY_INTENT_RE.search(question or ""):
+        return text  # user ne khud manga — poora jawab zinda rahega
+    q_tokens = {w.lower() for w in re.findall(r"[A-Za-z0-9_.@#-]+", question or "")
+                if len(w) >= 3 and w.lower() not in _QSTOP}
+    if not q_tokens:
+        return text  # sawal hi vague — LLM ke hvaale (gates ne already kaam kiya)
+    for ln in key_lines:
+        # value + label ke tokens — agar question ka koi SPECIFIC token
+        # line me milta hai to topic match hai, line zinda rahegi
+        ln_tokens = {w.lower() for w in re.findall(r"[A-Za-z0-9_.@#-]+", ln)
+                     if len(w) >= 3 and w.lower() not in _QSTOP}
+        if ln_tokens & q_tokens:
+            continue
+        # no topic overlap + no key-intent — UNREQUESTED dump: strip
+        text = text.replace(ln + "\n", "").replace(ln, "")
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text or None
+
+
 def _extract_rule(text: str | None, user_ctx: dict,
                   question: str | None = None) -> tuple[str | None, int]:
     """Save the owner's RULE: lines as standing instructions.
@@ -1006,6 +1068,18 @@ def answer(question: str, user_ctx: dict) -> dict:
             # v3.3: fabricated post links (#245 instead of #197) are
             # corrected to the REAL post — and the real post is delivered.
             text, grounded_offer = _ground_post_links(text, question, hits)
+            # v4.0 TRUTH LAYER: answer ke andar jo bhi managed-channel
+            # post links hain, LIVE channel par verify karo — dead link
+            # (deleted post) replace + purge ho jata hai (ZYROX bug).
+            try:
+                text = verify.verify_answer_links(text, question)
+            except Exception:
+                pass
+            # v4.0: mangne ke bina key/password dump guard (BAT-key bug)
+            try:
+                text = sanitize_unrequested_keys(text, question)
+            except Exception:
+                pass
         except ai_engine.NoProvidersError:
             return {
                 "text": "AI keys configure nahi hain. Owner se bolo set karein.",
@@ -1069,6 +1143,15 @@ def answer(question: str, user_ctx: dict) -> dict:
                                            GENERAL_PROMPT)
         text, _ = _extract_rule(text, user_ctx, question)
         text = sanitize_claims(text)
+        # v4.0 TRUTH LAYER + unrequested-key guard — general path par bhi
+        try:
+            text = verify.verify_answer_links(text, question)
+        except Exception:
+            pass
+        try:
+            text = sanitize_unrequested_keys(text, question)
+        except Exception:
+            pass
         return {
             "text": text,
             "grounded": False,

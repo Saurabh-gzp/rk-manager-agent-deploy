@@ -1,7 +1,37 @@
-# RK Manager Agent 🤖 v3
+# RK Manager Agent 🤖 v4.0 TRUTH AGENT
 
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
+**v4.0 adds a REAL-TIME TRUTH LAYER**: every channel post the bot talks
+about is verified against the LIVE channel before the user ever sees it.
+
+## v4.0 TRUTH AGENT kit (owner's last-chance list — all 8 issues)
+
+Owner ke live issues — root cause + fix + tests (335 total pass):
+
+| Issue (live) | Root cause | Fix |
+|---|---|---|
+| **"Channel me koi post krta hu to channel post ko bhi ye group se delete kr deta hai (owner ka promotion bhi)"** | Channel posts jo linked group me **auto-forward** hote hain unka `from` ek FAKE pseudo-user hota hai (channel ki taraf se) — owner-exemption (`user_id == OWNER`) kabhi match nahi hoti; promo-regex owner ke promotion ke t.me links par fire karti thi; `getChatMember(fake_id)` galat status deta tha → **DELETE** | `moderation.handle_group_message` me **channel-backed messages (`is_automatic_forward` / `sender_chat` / GroupAnonymousBot id) KABHI moderate nahi hote** — owner ka channel content group me immortal hai. Plus **`getChatAdministrators` whitelist** (5-min cache, ek hi API call) — naye admins/pseudo senders sab cover |
+| **"Jo channel se delete ho chuka hai vo link bhi bhej deta hai — ZYROX 7 dead links spam. Latest data se response nahi, OLD data se deta hai"** | Telegram Bot API deleted-post events push NAHI karta; DB me purane posts zinda rehte the; LLM unhi dead links ko context se quote karta tha | **Naya `verify.py` TRUTH LAYER (3 levels)**: (1) **answer-outbound gate** — answer ke har managed-channel post link ko LIVE verify karo (public channel: t.me HTTP probe, 10-min cache) — dead link = DB purge + honest rewrite ("ye post delete ho chuka hai"); (2) **background sweep** — daemon thread har 30 min recent 60 posts verify karta hai, dead purge — dead links LLM context me kabhi nahi aate; (3) delivery-time `not found` probe (v3.4) — private channels ka authority. Private channel (t.me/c/) par HTTP probe impossible — wahan delivery-pro + answer-path delivery hi authoritative hai |
+| **"Mene aisa to bola hi nhi ki mujhe BAT ka key chahiye — bina maange key de diya"** | LLM context me dekha BAT key wala post aur 'helpful' banne ke liye volunteer kar diya | **NO UNREQUESTED CONTENT prompt rule** (hard ban: topic X pucha hai to topic Y ka key/code/link dena FORBIDDEN) + **deterministic `sanitize_unrequested_keys` guard** — answer me 'KEY: xxx' value line ho + question me key-intent na ho + topic bhi match na kare → line strip. Legit 'BAT ka key batao' jawab kabhi affect nahi hota |
+| **"User key maang raha tha — koi response hi nahi diya" (spoo.me/Ox5jh1)** | v3.4/v3.5 exchange-guard: A<->B baat me **ASKER KHUD** genuine help-sawal puche to bhi silence; + gate-LLM error (429/timeout) par members ke liye fail-closed | **v4.0: exchange-guard ab asker-aware** — genuine help-sawal/request (`key kha milega`, `app do`) exchange me bhi ANSWER hota hai (budget-capped); sirf chatter silent. **Gate-error fail-open for help-questions** — infra failure kabhi genuine madaad nigal nahi sakta. Reply-to-OTHER-MEMBER wale requests ab bhi silent (member-to-member respect intact) |
+| **"2 users ki baat-cheet me spam karta hai"** | Budget 4/300s loose tha, min-gap nahi tha | **Budget 3/600s + MIN-GAP 45s** — machine-gun undirected replies ab structurally impossible. Directed (mention//ask/reply-to-bot) + owner exempt. Channel-post copies exchange-detection me ab participant nahi (owner ka post beech me aa jaye to A-B 'exchange' nahi tootti) |
+| **"Koi bhi file bhej deta hai"** (v3.4 residual) | — | v3.3/v3.4 precision gates intact (file_name 3x match, specific-token required, file-topic precondition) + naya unrequested-content guard |
+| **"Gemini ke normal model ko ADVANCE agent banao — skills, tools, kaise baat kare, manage kare"** | — | **Agentic architecture already wired + v4.0 truth layer**: (1) tool-use loop — `LOOKUP:` self-directed deep-search (multi-step, instant), deterministic REAL forward/copy delivery engine (LLM kabhi 'bhej di' claim nahi kar sakta — system notice hi announce karta hai); (2) 4-tier smart routing (directed → explicit request → help-question → balanced LLM gate with full conversation context); (3) moderation tools (delete/mute/warn/ban + Rose-style /filter content-delivery filters); (4) standing rules + `/sikhao` teach system (owner ke self-learning skills); (5) **memory compaction** (industry pattern — Claude/OpenAI 'compaction' jaisa): per-chat hard cap 2000 → old messages compact LLM digest ban jaate hain, Q&A cap 400, bounded search (data jitna bada ho, latency same); (6) **real-time verification** (naya) — 3-level truth layer upar |
+| **"Chats ka data bahot bada ho jayega — agent slow/stuck"** | — | v3.5 memory management intact (hard caps + LLM digests + TTL prune + bounded search) — internet-researched pattern, live-proven |
+
+Env knobs (naye): `VERIFY_ENABLED` (default 1), `VERIFY_SWEEP_MINUTES` (30),
+`VERIFY_SWEEP_BATCH` (60), `REPLY_BUDGET` (3), `REPLY_BUDGET_SECONDS` (600),
+`REPLY_MIN_GAP_SECONDS` (45).
+
+**Research notes (user ne online research karne ko bola tha):**
+- Telegram Bot API deleted-message updates nahi deta — open feature request
+  (Bot API issue #286). Isliye deletion-detection delivery-probe + t.me
+  HTTP probe + periodic sweep se hota hai (verify.py).
+- Memory growth: industry "compaction" pattern (Claude Platform / OpenAI
+  docs) — old turns ko summary se replace karo, state preserve karo. v3.5
+  me already implemented (LLM digests + hard caps); v4.0 recency-first
+  search fetch bhi (newest posts hamesha candidate set me).
 
 ## v3.5 SMART LISTENER kit (owner request: silent bot + memory growth)
 

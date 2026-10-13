@@ -242,6 +242,42 @@ def _strike(namespace: str, chat_id: int, user_id: int) -> int:
     return count
 
 
+_GROUP_ANON_BOT_ID = 1087968824  # Telegram's GroupAnonymousBot pseudo-user
+_ADMIN_CACHE: dict[int, tuple[float, set[int]]] = {}
+_ADMIN_CACHE_TTL = 300.0  # 5 min
+
+
+def _known_admin_ids(chat_id: int) -> set[int]:
+    """Cached set of admin/creator user ids for a chat (single API call).
+
+    v4.0: owner ka live issue — 'channel me koi post krta hu to channel post
+    ko bhi ye group se delete kr deta hai'. Channel posts jo linked group me
+    auto-forward hote hain unka from ek FAKE/pseudo user hota hai (channel
+    ki taraf se), isliye per-user getChatMember check galat status de sakta
+    hai. getChatAdministrators ek hi call me poora whitelist deta hai.
+    Fail-open: API fail ho to empty set (moderation fir bhi v3.4 wale
+    per-user check par fallback karti hai).
+    """
+    now = time.time()
+    hit = _ADMIN_CACHE.get(chat_id)
+    if hit and now - hit[0] < _ADMIN_CACHE_TTL:
+        return hit[1]
+    ids: set[int] = set()
+    try:
+        for m in tg_api.get_chat_administrators(chat_id) or []:
+            u = m.get("user") or {}
+            if m.get("status") in ("administrator", "creator") and u.get("id"):
+                ids.add(int(u["id"]))
+    except Exception:
+        return set()
+    _ADMIN_CACHE[chat_id] = (now, ids)
+    return ids
+
+
+def invalidate_admin_cache() -> None:
+    _ADMIN_CACHE.clear()
+
+
 def handle_group_message(msg: dict) -> bool:
     """Group message gate: abuse/promo moderation + Rose-style filters.
 
@@ -250,6 +286,16 @@ def handle_group_message(msg: dict) -> bool:
     - Rose-style content filters: when ANYONE (owner, admin, member) uses
       a saved keyword, the saved content is DELIVERED as-is as a reply —
       the triggering message is NEVER deleted. Exactly like @MissRose_bot.
+
+    v4.0 CRITICAL GUARD (owner ka live issue: 'channel me promotion post
+    karta hu to bot uska group-copy delete kar deta hai'):
+      - is_automatic_forward / sender_chat wale messages CHANNEL ke hain
+        (channel -> linked discussion group auto-copy). Unhe moderation
+        KABHI nahi chhooti — owner ka promotion post t.me links kyun
+        rakhta hai, promo-rule galat trigger ho jati thi aur fake-from
+        ki wajah se owner-exemption bhi lagu nahi hoti thi.
+      - GroupAnonymousBot (1087968824) aur channel-pseudo senders bhi
+        exempt hain.
 
     Returns True when the message was fully handled (stop processing).
     """
@@ -262,6 +308,17 @@ def handle_group_message(msg: dict) -> bool:
     # Cache album parts (in-memory, cheap) so /filter can save whole
     # media groups later. Never raises, no API calls.
     remember_media(chat_id, msg)
+
+    # --- v4.0: channel-backed messages are NEVER moderated ---
+    # 1) auto-forwarded channel post copies in the linked group
+    if msg.get("is_automatic_forward"):
+        return False
+    # 2) sent on behalf of a chat (the channel itself / anonymous admins)
+    if msg.get("sender_chat"):
+        return False
+    # 3) Telegram's anonymous-admin / channel pseudo user (belt & braces)
+    if user_id == _GROUP_ANON_BOT_ID:
+        return False
 
     if (
         not is_enabled()
@@ -303,6 +360,14 @@ def handle_group_message(msg: dict) -> bool:
 
     # Do not moderate or mute group admins; fail open if Telegram cannot
     # establish the member's current role.
+    # v4.0: getChatAdministrators whitelist (cached, ONE call) pehle —
+    # fake-from/pseudo users aur naye admins sab cover ho jaate hain.
+    # Per-user getChatMember uska fallback hai (dono fail-open).
+    try:
+        if user_id in _known_admin_ids(chat_id):
+            return False
+    except Exception:
+        pass
     member = tg_api.get_chat_member(chat_id, user_id)
     if member.get("status") in ("administrator", "creator") or not member.get("status"):
         return False

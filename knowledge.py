@@ -257,12 +257,21 @@ def search(query: str, limit: int = 10, user_id: int | None = None,
     pattern = "|".join(re.escape(t) for t in tokens)
     rx = {"$regex": pattern, "$options": "i"}
 
-    def _fetch(coll, flt, cap=80):
+    def _fetch(coll, flt, cap=80, recency=False):
         try:
             cur = coll.find(flt)
             if hasattr(cur, "limit"):  # pymongo cursor
+                if recency and hasattr(cur, "sort"):
+                    # v4.0: newest-first fetch — 'latest channel data ke
+                    # hisab se response' guarantee: purane dead/mismatched
+                    # posts kabhi latest posts ko candidate set se nahi
+                    # dhakelte (match_score tie par date sort already hai).
+                    cur = cur.sort("date", -1)
                 return list(cur.limit(cap))
-            return list(cur)[:cap]     # in-memory fallback
+            docs = list(cur)[:cap]     # in-memory fallback
+            if recency:
+                docs.sort(key=lambda d: (d.get("date") or 0), reverse=True)
+            return docs
         except Exception:
             return []
 
@@ -275,10 +284,10 @@ def search(query: str, limit: int = 10, user_id: int | None = None,
     if user_id is not None:
         qa_flt["user_id"] = user_id
 
-    msgs = _fetch(db["messages"], msg_flt)
+    msgs = _fetch(db["messages"], msg_flt, recency=True)
     posts = _fetch(db["channel_posts"], {
         "$or": [{"text": rx}, {"caption": rx}, {"file_name": rx},
-                {"links": rx}]})
+                {"links": rx}]}, recency=True)
     qas = _fetch(db["qa"], qa_flt)
     digests = _fetch(db["digests"], {"summary": rx})
 

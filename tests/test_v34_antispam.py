@@ -125,18 +125,45 @@ class MemberExchangeGuardTests(IMDBTestCase):
         answer.assert_not_called()
         send.assert_not_called()
 
-    def test_request_between_two_members_gets_silence(self):
-        """Even an explicit request ('app do') inside an A<->B exchange
-        stays silent — the bot must not interject with files mid-chat."""
+    def test_request_between_two_members_gets_answered_v40(self):
+        """v4.0 BEHAVIOR CHANGE (live evidence spoo.me/Ox5jh1: member ne
+        genuine request kiya aur bot SILENT raha — 'dumb agent' complaint):
+        A<->B exchange me bhi ASKER ka EXPLICIT request ('app do') ab
+        ANSWER hota hai — madaad maangna conversation nahi todta. Anti-spam
+        phir bhi intact: budget (3/600s) + min-gap (45s) is reply ko cap
+        karte hain, aur chatter par silence waisi hi hai (test above).
+        MEMBER-SE-MEMBER REPLY (reply_to dusra member) ab bhi silent hai —
+        wo check routing me pehle hi hai."""
         self._seed_exchange()
         self._link_channel()
         self._seed_post(197, caption="twitter app",
                         file_name="com_twitter_android.apkm")
         patches = self._base_patches()
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], \
+                patch.object(bot.tg_api, "forward_message") as fw, \
+                patch.object(bot.tg_api, "copy_message"):
+            bot.handle_message(group_message("twitter wala app do", user_id=111))
+        # real forward delivery fired (help where needed)
+        self.assertTrue(fw.called)
+
+    def test_member_reply_to_other_member_request_still_silent(self):
+        """A B ke message ko REPLY karke request karta hai — wo member-to-
+        member addressed hai, bot interrupt NAHI karega (v3.4 rule intact).
+        v4.0 ka answer-exemption sirf NON-reply (group-general) messages
+        ke liye hai."""
+        self._seed_exchange()
+        self._link_channel()
+        self._seed_post(197, caption="twitter app",
+                        file_name="com_twitter_android.apkm")
+        replied = {"message_id": 55, "from": {"id": 222, "first_name": "B"}}
+        patches = self._base_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patches[5] as send, \
                 patch.object(bot.tg_api, "forward_message") as fw:
-            bot.handle_message(group_message("twitter wala app do", user_id=111))
+            bot.handle_message(group_message("twitter wala app do",
+                                             user_id=111,
+                                             reply_to_message=replied))
         fw.assert_not_called()
         send.assert_not_called()
 
@@ -238,10 +265,22 @@ class ReplyBudgetTests(IMDBTestCase):
         return answer
 
     def test_budget_exhaustion_silences_undirected(self):
-        for _ in range(4):
-            self._run().assert_called_once()
-        # 5th undirected reply: budget over (4/300s already spent)
-        self._run().assert_not_called()
+        # v4.0: budget 3/600s + min-gap 45s. Gap isolate karne ke liye 0
+        # kiya — budget semantics pure test hota hai (gap ka apna test
+        # test_v40_truth_agent.py me hai).
+        with patch.object(bot, "_REPLY_MIN_GAP_SECONDS", 0):
+            for _ in range(3):
+                self._run().assert_called_once()
+            # 4th undirected reply: budget over (3/600s already spent)
+            self._run().assert_not_called()
+
+    def test_min_gap_blocks_back_to_back_undirected_v40(self):
+        # v4.0 min-gap: budget ke andar bhi do instant undirected replies
+        # nahi — machine-gun spam ka hard backstop
+        first = self._run()
+        first.assert_called_once()
+        second = self._run()
+        second.assert_not_called()
 
     def test_owner_never_budget_limited(self):
         for _ in range(6):

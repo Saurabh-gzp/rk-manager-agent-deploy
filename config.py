@@ -86,3 +86,10 @@ USER_MEMORY_IDLE_DAYS = max(1, _int("USER_MEMORY_IDLE_DAYS", 7))
 MEMORY_MAX_MESSAGES_PER_CHAT = _int("MEMORY_MAX_MESSAGES_PER_CHAT", 2000)
 MEMORY_MAX_QA_PER_USER = _int("MEMORY_MAX_QA_PER_USER", 400)
 DIGEST_ENABLED = _int("DIGEST_ENABLED", 1)
+# --- v4.0 TRUTH LAYER (real-time channel verification) ---
+# Public channel ke t.me/<user>/<N> posts bina login probe hote hain;
+# confirmed-deleted posts DB se purge ho jaate hain. VERIFY_ENABLED=0
+# karne par answer-link verification + background sweep dono band.
+VERIFY_ENABLED = _int("VERIFY_ENABLED", 1)
+VERIFY_SWEEP_MINUTES = max(5, _int("VERIFY_SWEEP_MINUTES", 30))
+VERIFY_SWEEP_BATCH = _int("VERIFY_SWEEP_BATCH", 60)

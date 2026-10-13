@@ -47,6 +47,7 @@ import teach  # noqa: E402
 import channel_forward  # noqa: E402
 import community  # noqa: E402
 import fmt  # noqa: E402
+import verify  # noqa: E402  # v4.0 TRUTH LAYER
 
 
 def log(*args):
@@ -176,18 +177,31 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-_REPLY_BUDGET = _int_env("REPLY_BUDGET", 4)
-_REPLY_BUDGET_SECONDS = _int_env("REPLY_BUDGET_SECONDS", 300)
+_REPLY_BUDGET = _int_env("REPLY_BUDGET", 3)
+_REPLY_BUDGET_SECONDS = _int_env("REPLY_BUDGET_SECONDS", 600)
+# v4.0: do undirected replies ke beech MINIMUM GAP — budget ke andar bhi
+# bot 3 jawab 10 min me de sakta hai, par back-to-back machine-gun spam
+# (2 members ki baat-cheet me ek ke baad ek jawab) kabhi nahi. Default
+# 45s; owner env se REPLY_MIN_GAP_SECONDS badal sakta hai.
+_REPLY_MIN_GAP_SECONDS = _int_env("REPLY_MIN_GAP_SECONDS", 45)
 
 
 def _reply_budget_ok(chat_id: int) -> bool:
-    """True jab tak undirected-reply budget bacha hai (and records this one)."""
+    """True jab tak undirected-reply budget bacha hai (and records this one).
+
+    v4.0: budget (default 3/600s) + MIN-GAP (default 45s) dono lagte hain
+    — 'bot 2 users ki baat-cheet me bahot messages krta hai' issue ka
+    hard backstop. Owner, /ask, @mention aur reply-to-bot exempt hain.
+    """
     now = time.time()
     dq = _REPLY_TIMES[chat_id]
     while dq and now - dq[0] > _REPLY_BUDGET_SECONDS:
         dq.popleft()
     if len(dq) >= _REPLY_BUDGET:
         log(f"reply budget exhausted for chat {chat_id} — staying silent")
+        return False
+    if dq and (now - dq[-1]) < _REPLY_MIN_GAP_SECONDS:
+        log(f"reply min-gap active for chat {chat_id} — staying silent")
         return False
     dq.append(now)
     return True
@@ -200,12 +214,16 @@ def _member_exchange(chat_id: int) -> tuple[int, int] | None:
 
     Rule: the last two remembered messages are both from members, from
     DIFFERENT users, and NONE of the last four messages is from the bot.
-    Tab wapas (uid1, uid2) — caller decide karta hai:
-      - asker KHUD us exchange ka part hai -> user-to-user baat, bot chup
-        rahega (na gate call, na answer, na forward — v3.4 behavior).
+    v4.0: channel-backed copies (owner ke channel posts ka group mirror)
+    participants NAHI hain — unhe context se nikaal kar analyze karo,
+    warna ek beech ka channel post do members ke 'exchange' ko tod deta
+    tha. Tab wapas (uid1, uid2) — caller decide karta hai:
+      - asker KHUD us exchange ka part hai -> user-to-user baat (chatter
+        par) bot chup rahega (na gate call, na answer, na forward).
       - koi TEESRA member exchange ke beech me help maangta hai -> v3.5
         SMART LISTENER: uska sawal group ko tha, exchange ka nahi — bot
         help karega (budget ke saath).
+      - v4.0: asker khud help-sawal/request rakhta hai to silence nahi.
     Bot ke naam/mention/reply pe ye guard lagu NAHI hota."""
     try:
         ctx = _GROUP_CONTEXT.get(chat_id)
@@ -213,8 +231,8 @@ def _member_exchange(chat_id: int) -> tuple[int, int] | None:
             return None
         # NOTE: the CURRENT message is already remembered as the last entry
         # (handle_message remembers right after ingest). Analyse the prior
-        # conversation WITHOUT it.
-        prior = list(ctx)[:-1]
+        # conversation WITHOUT it — and WITHOUT channel-backed copies.
+        prior = [m for m in list(ctx)[:-1] if not m.get("is_channel")]
         if len(prior) < 2:
             return None
         last2 = prior[-2:]
@@ -662,12 +680,20 @@ def _download_media(msg: dict) -> tuple[list[dict], str | None]:
 
 def _remember(chat_id: int, name: str, text: str,
               is_bot: bool = False, is_owner: bool = False,
-              uid: int | None = None) -> None:
+              uid: int | None = None, is_channel: bool = False) -> None:
     text = (text or "").strip()
     if chat_id and text:
         _GROUP_CONTEXT[chat_id].append(
             {"name": name, "text": text[:300], "is_bot": is_bot,
-             "owner": is_owner, "uid": 0 if is_bot else uid})
+             "owner": is_owner, "uid": 0 if is_bot else uid,
+             "is_channel": is_channel})
+
+
+def _is_channel_backed(msg: dict) -> bool:
+    """v4.0: message channel ki taraf se bheji gayi hai (auto-forwarded
+    channel-post copy ya channel-identity sender) — owner ka content,
+    moderation/exchange-detection me participant NAHI hai."""
+    return bool(msg.get("is_automatic_forward") or msg.get("sender_chat"))
 
 
 def _remember_qa(uid: int, chat_id: int, question: str, answer: str | None,
@@ -1205,10 +1231,13 @@ def handle_message(msg) -> None:
         # Learn from every non-command non-bot message
         knowledge.ingest_message(msg)
         # Remember for the reply gate's conversation context.
+        # v4.0: channel-backed copies (auto-forward posts) flagged — ye
+        # exchange-participant nahi hain (owner ka channel content hai).
         _who = user.get("first_name") or user.get("username") or "member"
         _remember(chat_id, _who,
                   text or " ".join(_MEDIA_KIND_LABEL[k] for k in _media_kinds(msg)),
-                  is_owner=(uid == config.OWNER_CHAT_ID), uid=uid)
+                  is_owner=(uid == config.OWNER_CHAT_ID), uid=uid,
+                  is_channel=_is_channel_backed(msg))
 
         # Remember any channel-post link seen in this chat (even unhandled)
         # so later 'vo wala message bhejo' requests can resolve it.
@@ -1303,7 +1332,13 @@ def handle_message(msg) -> None:
                 # interrupt NAHI karega (na gate call, na answer, na
                 # forward). Ye '?' wale user-to-user questions ka direct
                 # fix hai.
-                if asker_in_exchange:
+                # v4.0 FIX (spoo.me/Ox5jh1 — 'key kha milega' par koi jawab
+                # nahi): agar ASKER khud exchange me GENUINE help-sawal /
+                # request rakh raha hai, to silence GALAT hai — madaad
+                # maangna conversation nahi todta. Chup sirf tab jab
+                # message chatter/banter hai.
+                if asker_in_exchange and not (help_q
+                                              or triggers.is_explicit_request(text)):
                     return
                 # v3.5: koi TEESRA member unke beech help maang raha hai
                 # ('key kha milega') — uska sawal group ko tha, un exchange
@@ -1339,10 +1374,11 @@ def handle_message(msg) -> None:
                 if gate is False:
                     return  # clean NO — not for the bot
                 # gate is None (gate LLM ERROR): v3.3 — the OWNER never gets
-                # silence on our own infra failure (fail-open for owner;
-                # members stay silent as before — EXCEPT v3.5 help-questions
-                # were already routed above, so they never die here).
-                if gate is None and uid != config.OWNER_CHAT_ID:
+                # silence on our own infra failure (fail-open for owner).
+                # v4.0: genuine help-sawal bhi infra failure par mute
+                # nahi honge — 'member ne key maangi, bot chup raha' wala
+                # live case exactly ye tha (429/timeout ne reply kha liya).
+                if gate is None and uid != config.OWNER_CHAT_ID and not help_q:
                     return
             # v3.4 anti-spam budget: undirected replies (gate-YES ya request
             # words) per chat limited. /ask, mention, reply-to-bot aur owner
@@ -1671,13 +1707,20 @@ def run_webhook() -> None:
 
 
 def main() -> None:
-    log("starting RK Manager Agent…")
+    log("starting RK Manager Agent v4.0 (TRUTH AGENT)…")
     log(f"owner={config.OWNER_CHAT_ID} admin={config.ADMIN_CHAT_ID or config.OWNER_CHAT_ID}")
     log(f"gemini_keys={len(config.GEMINI_KEYS)} deepseek={'yes' if config.DEEPSEEK_KEY else 'no'}")
     log(
         "storage=MongoDB (persistent)" if db.is_persistent()
         else "storage=in-memory (volatile; restart loses stored data)"
     )
+    # v4.0 TRUTH LAYER: background channel-post verifier (public channels
+    # ka t.me probe + dead-post purge) — old/deleted data ka naya jawab.
+    try:
+        verify.start_background_sweep()
+        log("verify sweep thread started (30 min cycle, bounded batches)")
+    except Exception:
+        log("verify sweep failed to start (non-fatal)")
     # Telegram command menu (the '/' button) register karo — best-effort.
     try:
         commands.setup_bot_commands()

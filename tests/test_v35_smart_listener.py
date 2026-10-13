@@ -218,20 +218,24 @@ class ExchangeGuardV35Tests(IMDBTestCase):
         bot._remember(CHAT, "A", "crown loader ka key mila?", uid=111)
         bot._remember(CHAT, "B", "haan mila bhai", uid=222)
 
-    def test_exchange_participant_help_question_silent(self):
-        """A<->B baat kar rahe hain, A B se 'maal kaha milega?' puch raha
-        hai — user-to-user, bot chup rahega (anti-spam intact)."""
+    def test_exchange_participant_help_question_answered_v40(self):
+        """v4.0 BEHAVIOR CHANGE (spoo.me/Ox5jh1 live case): A<->B baat me
+        A khud 'maal kaha milega?' type help-sawal puchta hai — ab ANSWER
+        hota hai. v3.4/v3.5 me is exact shape par silence thi (gate
+        error/conservative gate ne genuine madaad nigal li) — user ne is
+        'dumb agent' ko last-chance issue banaya. Chatter par silence
+        abhi bhi hai (upar wale tests), budget bhi lagta hai."""
         self._seed_exchange()
         patches = self._base_patches()
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                patches[5] as send, \
+                patches[5], \
                 patch.object(bot, "_should_reply_llm") as gate, \
-                patch.object(bot.agent, "answer") as answer:
+                patch.object(bot.agent, "answer",
+                             return_value={"text": "channel se milega bhai"}) as answer:
             bot.handle_message(group_message("bhai maal kaha milega?",
                                              user_id=111))
-        gate.assert_not_called()
-        answer.assert_not_called()
-        send.assert_not_called()
+        answer.assert_called_once()
+        gate.assert_not_called()  # help tier — gate skip, direct answer
 
     def test_third_party_help_question_answered_mid_exchange(self):
         """A<->B baat kar rahe hain, TEESRA member PA 'key kha milega'
@@ -261,12 +265,14 @@ class ExchangeGuardV35Tests(IMDBTestCase):
 
     def test_help_question_budget_capped(self):
         """Anti-spam backstop: help-question answers bhi reply-budget
-        (4/300s) me hain — ye tier spam wapas nahi layega."""
+        (3/600s + 45s min-gap) me hain — ye tier spam wapas nahi layega.
+        Gap isolate (0) taaki budget semantics pure test ho."""
         import time as _time
-        with patch.object(bot, "_REPLY_BUDGET", 4), \
-                patch.object(bot, "_REPLY_BUDGET_SECONDS", 300):
+        with patch.object(bot, "_REPLY_BUDGET", 3), \
+                patch.object(bot, "_REPLY_BUDGET_SECONDS", 300), \
+                patch.object(bot, "_REPLY_MIN_GAP_SECONDS", 0):
             bot._REPLY_TIMES.clear()
-            for i in range(4):
+            for i in range(3):
                 patches = self._base_patches()
                 with patches[0], patches[1], patches[2], patches[3], \
                         patches[4], patches[5], \
@@ -276,7 +282,7 @@ class ExchangeGuardV35Tests(IMDBTestCase):
                         f"key kha milega {i}", user_id=444,
                         message_id=500 + i))
                 answer.assert_called_once()
-            # 5th — budget over, silence
+            # 4th — budget over, silence
             patches = self._base_patches()
             with patches[0], patches[1], patches[2], patches[3], \
                     patches[4], patches[5], \
