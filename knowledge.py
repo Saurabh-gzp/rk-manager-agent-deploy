@@ -1,4 +1,17 @@
-"""Knowledge store: ingestion, search, importance scoring, self-cleanup."""
+"""Knowledge store: ingestion, search, importance scoring, self-cleanup.
+
+v3.5 MEMORY MANAGEMENT (owner ka live concern: 'chats ka data store hoga
+to ek din bahot bada data ho jayega aur agent ko response dene me bahot
+time ya stuck ho sakta hai'):
+  - HARD CAP per chat (MEMORY_MAX_MESSAGES_PER_CHAT) — raw messages
+    kabhi cap se zyada store nahi honge.
+  - Compaction purane messages ko ek chhote LLM DIGEST (short summary)
+    me badal deta hai (industry 'conversation summary memory' pattern):
+    community facts bache rehte hain, size bounded rehta hai.
+  - Q&A per user ka bhi hard cap (MEMORY_MAX_QA_PER_USER).
+  - Search HAMESHA bounded hai (fetch cap 80, return limit) — data jitna
+    bada ho jaye, answer latency utni hi speed ki rahegi, kabhi stuck nahi.
+"""
 from __future__ import annotations
 import re
 import time
@@ -63,8 +76,21 @@ def _extract_contact(post: dict) -> dict | None:
 
 # --- ingest ---
 
+# v3.5: in-process per-chat message counters — ingest-time cap check ko
+# sasta banata hai (har message par Mongo count_documents nahi).
+_CHAT_MSG_COUNT: dict[int, int] = {}
+_COUNT_CHECK_EVERY = 100  # real count har ~100 messages par
+
+
 def ingest_message(msg: dict) -> None:
-    """Store one group/supergroup message. Never raises."""
+    """Store one group/supergroup message. Never raises.
+
+    v3.5: insert ke baad ek sasta in-memory counter badhta hai; har
+    ~100 messages par REAL count check hota hai aur chat cap se zyada
+    hone par compact_chat() purane messages ko digest me badal deta hai
+    (raw delete + chhota summary save). Isse data size bounded rehta hai
+    aur search speed waisi hi — agent kabhi slow/stuck nahi hoga.
+    """
     try:
         frm = msg.get("from") or {}
         if frm.get("is_bot"):
@@ -90,6 +116,14 @@ def ingest_message(msg: dict) -> None:
         if doc["chat_id"] is None or not text:
             return
         get_db()["messages"].insert_one(doc)
+        # v3.5 memory guard: sasta counter, periodic real check
+        try:
+            cid = int(doc["chat_id"])
+            _CHAT_MSG_COUNT[cid] = _CHAT_MSG_COUNT.get(cid, 0) + 1
+            if _CHAT_MSG_COUNT[cid] % _COUNT_CHECK_EVERY == 0:
+                compact_chat(cid)
+        except Exception:
+            pass
     except Exception as exc:  # noqa: BLE001
         print(f"[knowledge] ingest_message failed: {exc!r}", file=__import__("sys").stderr)
 
@@ -196,16 +230,25 @@ def _tokenize(query: str) -> list[str]:
     return [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2][:6]
 
 
-def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict]:
-    """Search the asking user's own history plus shared channel posts.
+def search(query: str, limit: int = 10, user_id: int | None = None,
+           chat_id: int | None = None) -> list[dict]:
+    """Search the user's/group's history plus shared channel posts.
 
-    Group messages and Q&A stay scoped to the current Telegram user so one
-    member's personal history is not surfaced in another member's answer.
+    Scope (v3.5):
+      - chat_id diya (group context) -> us GROUP ki saari messages search
+        hoti hain. Telegram group me waise bhi har member sab padh sakta
+        hai — isliye ye privacy boundary nahi todti, sirf grounding ko
+        'channel ke hisab se' REAL banati hai ('key kha milega' ka jawab
+        group/channel ke actual data se aayega).
+      - warna user_id scope (DM / per-user history) — pehle jaisa.
+    Q&A is always scoped to the asking user (uski personal track record).
 
     SPEED: ONE combined $or query per collection (3 total) instead of the
     old 5-queries-per-token loop (up to 30 Atlas roundtrips — measured
     ~4s per search on the M0 free tier; now ~0.4s). Multi-token relevance
-    is scored locally after the fetch.
+    is scored locally after the fetch. v3.5: digests (compact summaries)
+    bhi search me aate hain — purani community info raw data delete hone
+    ke baad bhi grounding me milti hai.
     """
     tokens = _tokenize(query)
     if not tokens:
@@ -224,7 +267,9 @@ def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict
             return []
 
     msg_flt: dict = {"text": rx}
-    if user_id is not None:
+    if chat_id is not None:
+        msg_flt["chat_id"] = chat_id
+    elif user_id is not None:
         msg_flt["user_id"] = user_id
     qa_flt: dict = {"$or": [{"question": rx}, {"answer": rx}]}
     if user_id is not None:
@@ -235,6 +280,7 @@ def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict
         "$or": [{"text": rx}, {"caption": rx}, {"file_name": rx},
                 {"links": rx}]})
     qas = _fetch(db["qa"], qa_flt)
+    digests = _fetch(db["digests"], {"summary": rx})
 
     lows = [t.casefold() for t in tokens]
 
@@ -282,6 +328,11 @@ def search(query: str, limit: int = 10, user_id: int | None = None) -> list[dict
             ])), row_extra)
     for d in qas:
         add(d, "qa", f"Q: {d.get('question','')}\nA: {d.get('answer','')}", {"chat_id": d.get("chat_id")})
+    for d in digests:
+        add(d, "digest",
+            f"[community digest of {d.get('msg_count', '?')} older messages] "
+            + str(d.get("summary", "")),
+            {"chat_id": d.get("chat_id")})
 
     hits.sort(
         key=lambda r: (r.get("match_score") or 0, r.get("date") or 0),
@@ -339,6 +390,110 @@ def purge_post(channel_id: int, message_id: int) -> bool:
         return False
 
 
+# --- v3.5 memory compaction: hard caps + LLM digests (short summaries) ---
+
+def summarize_batch(texts: list[str]) -> str | None:
+    """Ek chhota community-digest banane ke liye LLM call (best-effort).
+
+    Industry 'conversation summary memory' pattern ka core: purani
+    conversations ko ek compact summary me compact karo, raw data drop
+    karo. Summary me sirf COMMUNITY FACTS rehte hain (key ka process,
+    popular apps/loaders, rules, events) — usernames/PII nahi. LLM fail
+    ho jaye to None — caller raw delete SKIP kar deta hai (data kabhi
+    silently loss nahi hota).
+    """
+    if not texts:
+        return None
+    if not getattr(config, "DIGEST_ENABLED", 1):
+        return None
+    try:
+        import ai_engine  # local import — circular safety
+        sample = "\n".join("- " + t[:200] for t in texts[:80])
+        out = ai_engine.get_router().generate(
+            "Neeche ek Telegram gaming group ke purane messages hain. "
+            "Inka ek COMPACT digest banao (3-6 chhoti lines, Hinglish):\n"
+            "- sirf COMMUNITY ke kaam ki facts: keys/apps/loaders/files ka "
+            "process, rules, events, common problems + solutions\n"
+            "- usernames / personal chatter / PII KABHI mat likho\n"
+            "- har line ek alag fact ho\n\n"
+            "Messages:\n" + sample,
+            system="You compress group-chat history into short factual "
+                   "community-memory digests. Output only the digest lines.",
+            max_tokens=220,
+        )
+        out = (out or "").strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def compact_chat(chat_id: int, cap: int | None = None) -> dict:
+    """v3.5: ek chat ke raw messages ko MEMORY_MAX_MESSAGES_PER_CHAT par
+    hard-cap karo, aur hataye gaye purane messages ka LLM DIGEST banao.
+
+    Policy:
+      - importance >= 0.5 wale messages (lambe factual posts, owner rules)
+        KABHI raw delete nahi hote — wo hamesha searchable rehte hain.
+      - bakki oldest messages cap se jyada hone par digest me compact hote
+        hain; LLM digest ban jaye tabhi raw delete hota hai (fail = data
+        rehne do, agli cycle me phir try).
+      - digest 'digests' collection me chhota doc hai — search me
+        kind='digest' milta hai, isliye purani community info grounding
+        me bane rehti hai (bina size badaye).
+
+    Atlas M0 (512MB) + bounded search dono safe rehte hain: data growth
+    O(cap) hai, latency O(fetched docs) hai — agent slow/stuck kabhi
+    nahi hoga (owner ka live concern)."""
+    try:
+        db = get_db()
+        cap = cap if cap is not None else config.MEMORY_MAX_MESSAGES_PER_CHAT
+        if cap <= 0:
+            return {"total": 0, "removed": 0, "digest": False}
+        docs = list(db["messages"].find({"chat_id": chat_id}))
+        total = len(docs)
+        if total <= cap:
+            _CHAT_MSG_COUNT[chat_id] = total
+            return {"total": total, "removed": 0, "digest": False}
+        excess = total - cap
+        # high-importance ko hamesha rakho; victims = oldest low-importance
+        victims = [d for d in docs if (d.get("importance") or 0) < 0.5]
+        survivors = total - len(victims)
+        if survivors < cap:
+            # victims me se utne hi hatao jitna cap allow kare
+            need = excess
+        else:
+            # survivors already cap cover karte hain — jitna extra hai utna
+            # hi hatana hai, but never more than len(victims)
+            need = min(excess, len(victims))
+        if need <= 0:
+            _CHAT_MSG_COUNT[chat_id] = total
+            return {"total": total, "removed": 0, "digest": False}
+        victims.sort(key=lambda d: (d.get("date") or 0, str(d.get("_id"))))
+        drop = victims[:need]
+        digest = summarize_batch([str(d.get("text") or "") for d in drop])
+        if digest:
+            db["digests"].insert_one({
+                "chat_id": chat_id,
+                "summary": digest[:2000],
+                "msg_count": len(drop),
+                "ts_from": drop[0].get("date") or 0,
+                "ts_to": drop[-1].get("date") or 0,
+                "created_at": time.time(),
+            })
+        else:
+            # LLM digest fail — raw delete SKIP (silent data loss nahi)
+            _CHAT_MSG_COUNT[chat_id] = total
+            return {"total": total, "removed": 0, "digest": False}
+        for d in drop:
+            db["messages"].delete_many({"_id": d["_id"]})
+        _CHAT_MSG_COUNT[chat_id] = total - len(drop)
+        return {"total": total, "removed": len(drop), "digest": True}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[knowledge] compact_chat failed: {exc!r}",
+              file=__import__("sys").stderr)
+        return {"total": 0, "removed": 0, "digest": False}
+
+
 # --- prune / cleanup ---
 
 def _is_stale_message(d: dict, now: float) -> bool:
@@ -361,7 +516,12 @@ def _is_stale_post(d: dict, now: float) -> bool:
 
 
 def prune_once() -> dict:
-    """Run one cleanup cycle. Returns counts dict."""
+    """Run one cleanup cycle. Returns counts dict.
+
+    v3.5: ab HAR cycle me chat-level hard caps + digests + Q&A caps bhi
+    enforce hote hain — data growth hamesha bounded rehta hai (owner ka
+    'ek din bahot bada data ho jayega' concern ka structural fix).
+    """
     db = get_db()
     now = time.time()
     counts = {
@@ -370,6 +530,9 @@ def prune_once() -> dict:
         "qa_old": 0,
         "escalations_resolved": 0,
         "inactive_users": 0,
+        "compacted": 0,
+        "digests": 0,
+        "qa_capped": 0,
     }
 
     # Keep each member's complete history while they remain active. Clear that
@@ -432,6 +595,37 @@ def prune_once() -> dict:
         if d.get("status") == "resolved" and now - (d.get("created_ts") or 0) > 30 * 86400:
             db["escalations"].delete_many({"_id": d["_id"]})
             counts["escalations_resolved"] += 1
+    # v3.5 — CHAT HARD CAPS + DIGESTS: har chat ko cap par laao (purane
+    # messages compact summaries ban jaate hain, community facts bache
+    # rehte hain). Restart ke baad bhi guarantee — ye cycle 12h chalti hai.
+    chat_ids: set[int] = set()
+    for d in db["messages"].find():
+        try:
+            chat_ids.add(int(d.get("chat_id")))
+        except (TypeError, ValueError):
+            continue
+    for cid in chat_ids:
+        res = compact_chat(cid)
+        counts["compacted"] += res.get("removed") or 0
+        if res.get("digest"):
+            counts["digests"] += 1
+    # v3.5 — Q&A HARD CAP per user: bot ki di hui purani jawabon ki
+    # track-record unbounded grow na kare.
+    qa_by_user: dict[int, list[dict]] = {}
+    for d in db["qa"].find():
+        try:
+            qa_by_user.setdefault(int(d.get("user_id")), []).append(d)
+        except (TypeError, ValueError):
+            continue
+    qa_cap = config.MEMORY_MAX_QA_PER_USER
+    if qa_cap > 0:
+        for u, docs in qa_by_user.items():
+            if len(docs) <= qa_cap:
+                continue
+            docs.sort(key=lambda d: (d.get("date") or 0, str(d.get("_id"))))
+            for d in docs[: len(docs) - qa_cap]:
+                db["qa"].delete_many({"_id": d["_id"]})
+                counts["qa_capped"] += 1
     return counts
 
 
@@ -522,6 +716,7 @@ def stats() -> dict:
         "messages": db["messages"].count_documents({}),
         "posts": db["channel_posts"].count_documents({}),
         "qa": db["qa"].count_documents({}),
+        "digests": db["digests"].count_documents({}),
         "escalations_open": db["escalations"].count_documents({"status": {"$ne": "resolved"}}),
         "links": db["links"].count_documents({}),
     }

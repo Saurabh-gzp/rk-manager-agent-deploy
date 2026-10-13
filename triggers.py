@@ -41,6 +41,71 @@ _ACTION_REQUEST_RE = re.compile(
     r"|\b(?:permissions?|member\s?count|kitne\s+member)\b",
     re.IGNORECASE,
 )
+_WHERE_Q = r"(?:kahan|kahaan|kaha|kahaa|kha|kaha\s?se|kha\s?se|kaha\s?hai|where|how)"
+_AVAIL_V = r"(?:milega|milegaa|milegi|milenge|milengi|milta\s?hai|milti\s?hai|milti\s?hain|milti\s?ho|mil\s?sakta\s?hai|mil\s?sakte\s?hai|mil\s?skta|available\s?hai|available)"
+_TOPIC_N = r"(?:key|keys|app|apps|loader|loadar|file|files|link|links|panel|config|cfg|apk|apkm|mod|password|pass|game|cheez)"
+# v3.5 SMART LISTENER: help-seeking questions. Live issue tha ki member
+# group me genuinely help maang raha tha — 'key kha milega', 'hello koi
+# btayega key kha milega' — aur bot pura SILENT reh gaya (v3.4 discipline
+# itna strict ho gaya tha ki real sawal bhi nigal gaye). Ye tier un
+# messages ko pakadta hai jo:
+#   1. availability puchte hai — 'kaha milega / milega kya / kaise milega'
+#   2. group ko khul kar pukarte hai — 'koi btayega / anyone know / help'
+#   3. content-topic + kaha/how — 'key kaha hai', 'app kaha se lu'
+# Past-tense ('mila tha', 'mil gaya') yahan KABHI match nahi hota — wo
+# narration hai, sawal nahi. Bot in sawalo ka jawab CHANNEL/GROUP ke
+# actual data se deta hai (grounding wahi rahegi).
+_HELP_SEEKING_RE = re.compile(
+    r"\b" + _WHERE_Q + r"\b.{0,40}\b" + _AVAIL_V + r"\b"
+    r"|\b" + _AVAIL_V + r"\b.{0,40}\b" + _WHERE_Q + r"\b"
+    # direct 'how/where do I get' shapes — avail verb ki zaroorat nahi
+    r"|\b(where\s?can\s?i\s?get|where\s?can\s?we\s?get|where\s?do\s?i\s?get|"
+    r"where\s?to\s?get|how\s?to\s?get|how\s?do\s?i\s?get|how\s?can\s?i\s?get|"
+    r"kaise\s?milega|kese\s?milega|kaise\s?milta|kaise\s?milti|"
+    r"kaise\s?lu|kaise\s?le|kaha\s?se\s?lu|kaha\s?se\s?le)\b"
+    # topic + availability in one breath — 'key milega kya', 'app milta hai?'
+    r"|\b" + _TOPIC_N + r"\b.{0,20}\b" + _AVAIL_V + r"\b"
+    r"|\b" + _AVAIL_V + r"\b.{0,20}\b" + _TOPIC_N + r"\b"
+    r"|\b(koi|koi\s?bhi|kisiko|kisi\s?ko|anyone|somebody|someone)\b"
+    r".{0,40}\b(bta\s?do|bta|btayega|btaega|btaige|bata|batao|batayega|"
+    r"bataega|btaega|btaiga|bata\s?do|bataye\s?ga|tell|help|"
+    r"help\s?kar\s?do|help\s?kro)\b"
+    r"|\b(help\s?chahiye|help\s?chahiye\s?hai|help\s?karo|help\s?kro|"
+    r"help\s?kar\s?do|help\s?me|madad\s?chahiye|madad\s?karo)\b"
+    r"|\b" + _TOPIC_N + r"\b.{0,30}\b(kahan|kahaan|kaha|kahaa|kha|"
+    r"kaha\s?se|kha\s?se|where|how)\b",
+    re.IGNORECASE,
+)
+
+
+def is_help_seeking_question(text: str) -> bool:
+    """v3.5: True for genuine help-seeking questions the bot can answer
+    from channel/group data.
+
+    Ye '?'-bypass wala purana cheap-path NAHI hai — 'kal aayega?' jaisa
+    member-to-member sawal yahan match NAHI hota (availability verb /
+    help-call / topic+where inme se k kuch chahiye hi). Sirf wo sawal
+    jo channel data se answer ho sakte hain ('key kha milega') ya group
+    ko khul kar pukaarte hain ('koi btayega') is tier me aate hain.
+    Routing me inka jawab reply-budget + exchange-participant check ke
+    saath hota hai, isliye ye spam wapas nahi layega."""
+    text = (text or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    without_mentions = re.sub(r"@[\w]+", "", text).strip()
+    if not without_mentions:
+        return False
+    if _PLAIN_GREETING.fullmatch(without_mentions):
+        return False
+    # Past-tense narration ('koi bata diya tha', 'mil gaya tha') is a
+    # REPORT, not an ask — never treat it as a help question.
+    if re.search(r"\b(diya|di|bata\s?diya|mila|mil\s?gaya|mil\s?gayi|"
+                 r"bata\s?diya\s?tha|chuka|chuki)\s*(tha|thi|tha\s?hai|hai)\b",
+                 without_mentions, re.IGNORECASE):
+        return False
+    return bool(_HELP_SEEKING_RE.search(without_mentions))
+
+
 _PLAIN_GREETING = re.compile(
     r"^(?:hi+|h[eao]+y+|hyy+|hello+|hey+|yo+|sup|good morning|good evening|"
     r"thanks?|thank you|ok(?:ay)?|hmm+)[.!?]*$",

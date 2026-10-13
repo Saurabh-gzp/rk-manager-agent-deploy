@@ -193,41 +193,45 @@ def _reply_budget_ok(chat_id: int) -> bool:
     return True
 
 
-def _member_exchange_active(chat_id: int) -> bool:
-    """v3.4: True when two members are ACTIVELY talking to each other and
-    the bot has not been part of the recent exchange.
+def _member_exchange(chat_id: int) -> tuple[int, int] | None:
+    """v3.4/v3.5: the (uid1, uid2) pair of two members ACTIVELY talking to
+    each other when the bot has not been part of the recent exchange —
+    None otherwise.
 
     Rule: the last two remembered messages are both from members, from
     DIFFERENT users, and NONE of the last four messages is from the bot.
-    Tab bot chup rehta hai — na gate call, na answer, na forward. Ye
-    'do users ki baat-cheet me bahot message' issue ka direct fix hai:
-    seedha gate pahunchne se pehle hi silence ho jata hai (API call bhi
-    bachti hai). Bot ke naam/mention/reply pe ye guard lagu NAHI hota."""
+    Tab wapas (uid1, uid2) — caller decide karta hai:
+      - asker KHUD us exchange ka part hai -> user-to-user baat, bot chup
+        rahega (na gate call, na answer, na forward — v3.4 behavior).
+      - koi TEESRA member exchange ke beech me help maangta hai -> v3.5
+        SMART LISTENER: uska sawal group ko tha, exchange ka nahi — bot
+        help karega (budget ke saath).
+    Bot ke naam/mention/reply pe ye guard lagu NAHI hota."""
     try:
         ctx = _GROUP_CONTEXT.get(chat_id)
         if not ctx:
-            return False
+            return None
         # NOTE: the CURRENT message is already remembered as the last entry
         # (handle_message remembers right after ingest). Analyse the prior
         # conversation WITHOUT it.
         prior = list(ctx)[:-1]
         if len(prior) < 2:
-            return False
+            return None
         last2 = prior[-2:]
         if any(m.get("is_bot") for m in last2):
-            return False
+            return None
         u1, u2 = last2[0].get("uid"), last2[1].get("uid")
         if u1 is not None and u2 is not None and u1 == u2:
-            return False  # ek hi member ka monologue — gate decide karega
+            return None  # ek hi member ka monologue — gate decide karega
         if u1 is None or u2 is None:
             if (last2[0].get("name") or "") == (last2[1].get("name") or ""):
-                return False
+                return None
         # bot recent exchange me tha to interrupt mat karo flag ke bina
         if any(m.get("is_bot") for m in prior[-4:]):
-            return False
-        return True
+            return None
+        return (u1 if u1 is not None else 0, u2 if u2 is not None else 0)
     except Exception:
-        return False
+        return None
 
 
 # Conversational moderation requests ("isko mute kar do", "ye msg delete kr").
@@ -777,23 +781,31 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
         lines.append(who + ": " + m["text"])
     convo = "\n".join(lines) if lines else "(no earlier messages)"
     role = " (group OWNER)" if is_owner else ""
-    # v3.4: gate ab CONSERVATIVE hai — default NO. Purana prompt 'asks a
-    # question or requests something you could help with' bhi YES bol deta
-    # tha, isliye do members ki on-topic baat-cheet me bhi bot reply kar
-    # deta tha (live issue: '2 users ke baat-cheet me bahot message krta
-    # hai'). Ab YES sirf tab jab message CLEARLY bot ke liye ho.
+    # v3.5: gate ab BALANCED hai. v3.4 ka 'when in doubt, answer NO'
+    # itna strict tha ki genuine help-seeking sawal ('key kha milega')
+    # bhi nigal gaye — member ne 2 baar pucha aur bot chup raha. Ab
+    # rule ye hai: member-to-member baat me interrupt KABHI nahi (wo
+    # spam fix hai), PAR group ko khula puchha gaya help-sawal (jise
+    # channel data se answer kiya ja sakta hai) ka jawab dena bot ka
+    # KAAM hai. Asli madad answer hai, silence nahi.
     prompt = (
         "Recent group conversation:\n" + convo + "\n\n"
         + "New message from " + name + role + ": " + text + "\n\n"
         + "Should RK Manager (the group's AI manager -- that's YOU) reply to "
         + "this new message?\n"
-        + "Answer YES ONLY when the message is CLEARLY meant for you:\n"
+        + "Answer YES when:\n"
         + "- it addresses you by name (RK Manager / manager / bot, any "
         + "spelling), or\n"
         + "- it is a direct follow-up to YOUR own previous message, or\n"
         + "- it is an explicit command or request for the group manager "
         + "(mute/delete/ban/scan/group status/permissions/forward a post/"
         + "ask for an app, loader, key or file), or\n"
+        + "- it is a genuine question asking the GROUP for help or "
+        + "information you can answer from the channel/group data — e.g. "
+        + "'key kha milega', 'crown loader kaise download karu', 'koi "
+        + "btayega ...' — asked generally, NOT addressed to a specific "
+        + "other member, and no member has already answered it. Helping "
+        + "such askers is your JOB.\n"
         + "- it is from the OWNER and clearly expects your response.\n"
         + "Answer NO when:\n"
         + "- two members are talking to EACH OTHER — banter, gaming talk, "
@@ -805,7 +817,8 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
         "diya tha ...', 'khela hu', 'acha', 'ye mast hai', 'so gya tha') "
         "— even if the topic touches something you said before, or\n"
         + "- it is just a greeting, thanks, ok, hmm with nothing else.\n"
-        + "When in doubt, answer NO — staying silent is always safe.\n"
+        + "Rule of thumb: member-to-member chit-chat = NO; a general "
+        + "help-question nobody is answering = YES.\n"
         + "Answer with exactly one word: YES or NO."
     )
     try:
@@ -821,18 +834,27 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
     return out.strip().upper().startswith("YES")
 
 
-def _start_answer_prefetch(question: str, uid: int | None):
+def _start_answer_prefetch(question: str, uid: int | None,
+                           chat_id: int | None = None):
     """SPEED: run the answer's DB work (knowledge search + rules + facts)
     in a daemon thread WHILE the reply-gate LLM call is in flight. The box
     is handed to agent.answer(ctx['prefetch']) — the search latency hides
     completely behind the gate roundtrip instead of stacking after it.
+
+    v3.5: chat_id diya gaya (group context) to search GROUP-scoped hota
+    hai — group ki saari messages (jo waise bhi sab members ko dikhti
+    hain) grounding me aa jaati hain. Isse 'key kha milega' jaise sawal
+    ka jawab channel + group ke ACTUAL data se aata hai ('channel ke
+    hisab se'), sirf asker ki apni history se nahi.
     """
     import threading
     box: dict = {}
 
     def _work():
         try:
-            box["hits"] = knowledge.search(question, limit=10, user_id=uid)
+            box["hits"] = knowledge.search(question, limit=10,
+                                            user_id=uid,
+                                            chat_id=chat_id)
         except Exception:
             box["hits"] = None
         try:
@@ -1270,25 +1292,45 @@ def handle_message(msg) -> None:
                 return
             if _mentions_other_user(text, entities):
                 return
-            # v3.4: do members LAGBAG (last 2 alag members, bot last 4 me
-            # nahi) ek doosre se baat kar rahe hain — bot interrupt NAHI
-            # karega. Na gate call, na answer, na forward. Ye '?' wale
-            # user-to-user questions ka direct fix hai.
-            if _member_exchange_active(chat_id):
-                return
-            # v3.4: sirf EXPLICIT requests (bhejo/dedo/app do/help/scan
-            # karo) direct route hote hain. '?' ya 'kya/kab/kyu' shuru
-            # hone wale questions ab LLM gate se honge — wo context dekh
-            # kar decide karta hai ki sawal bot ke liye hai ya member
-            # dusre member se puch raha hai (live spam ka root cause).
-            if not triggers.is_explicit_request(text):
+            # v3.5 SMART LISTENER: ye message genuinely help-seeking sawal
+            # hai jo channel/group data se answer ho sakta hai?
+            help_q = triggers.is_help_seeking_question(text)
+            ex = _member_exchange(chat_id)
+            asker_in_exchange = bool(ex) and uid in ex
+            if ex:
+                # v3.4: do members ek doosre se baat kar rahe hain aur
+                # ASKER KHUD us exchange me hai — user-to-user baat, bot
+                # interrupt NAHI karega (na gate call, na answer, na
+                # forward). Ye '?' wale user-to-user questions ka direct
+                # fix hai.
+                if asker_in_exchange:
+                    return
+                # v3.5: koi TEESRA member unke beech help maang raha hai
+                # ('key kha milega') — uska sawal group ko tha, un exchange
+                # ka nahi. Help-hi-help: bot jawab dega (budget ke saath).
+                if not (help_q or triggers.is_explicit_request(text)):
+                    return
+                prefetch_box = _start_answer_prefetch(text, uid,
+                                                      chat_id=chat_id)
+            elif triggers.is_explicit_request(text) or help_q:
+                # v3.4: sirf EXPLICIT requests (bhejo/dedo/app do/help/scan
+                # karo) direct route hote the. v3.5: help-seeking questions
+                # ('key kha milega', 'koi btayega') bhi — live issue tha ki
+                # member ne 2 baar key ka sawal pucha aur bot pura silent
+                # raha kyunki gate conservative tha / fail ho gaya tha.
+                # Ab ye tier seedha answer hota hai: GROUNDING aur RAHEGI
+                # (answer sirf channel/group ke data se), budget bhi lagega.
+                prefetch_box = _start_answer_prefetch(text, uid,
+                                                      chat_id=chat_id)
+            else:
                 # Plain chatter ("hyy", "ok"): never needs a reply.
                 if triggers.is_plain_chatter(text):
                     return
                 # SPEED: answer-context (search/rules/facts) builds in a
                 # daemon thread WHILE the gate LLM call runs — if the gate
                 # says YES the answer starts instantly, zero added latency.
-                prefetch_box = _start_answer_prefetch(text, uid)
+                prefetch_box = _start_answer_prefetch(text, uid,
+                                                      chat_id=chat_id)
                 # Everything else: the bot decides itself with the LLM gate
                 # (it sees recent conversation context).
                 who = user.get("first_name") or user.get("username") or "member"
@@ -1298,11 +1340,10 @@ def handle_message(msg) -> None:
                     return  # clean NO — not for the bot
                 # gate is None (gate LLM ERROR): v3.3 — the OWNER never gets
                 # silence on our own infra failure (fail-open for owner;
-                # members stay silent as before).
+                # members stay silent as before — EXCEPT v3.5 help-questions
+                # were already routed above, so they never die here).
                 if gate is None and uid != config.OWNER_CHAT_ID:
                     return
-            else:
-                prefetch_box = _start_answer_prefetch(text, uid)
             # v3.4 anti-spam budget: undirected replies (gate-YES ya request
             # words) per chat limited. /ask, mention, reply-to-bot aur owner
             # ke messages hamesha serve hote hain — budget sirf bot ke apne
@@ -1347,7 +1388,7 @@ def handle_message(msg) -> None:
         else:
             question = text
         if prefetch_box is None:
-            prefetch_box = _start_answer_prefetch(text, uid)
+            prefetch_box = _start_answer_prefetch(text, uid, chat_id=chat_id)
         # Media-only message: give the gate something to judge from context
         # (e.g. the bot just asked for a screenshot).
         kinds = _media_kinds(msg)

@@ -595,7 +595,7 @@ def _maybe_deep_lookup(first_text: str | None, question: str,
         pass
     try:
         hits = knowledge.search(query, limit=10,
-                                user_id=user_ctx.get("user_id"))
+                                **_search_scope(user_ctx))
         ctx2 = _format_context(hits)
     except Exception:
         ctx2 = ""
@@ -865,6 +865,26 @@ def _deliver_channel_item(chat_id: int, item: dict,
     return {"ok": False, "description": "item not deliverable"}
 
 
+def _search_scope(user_ctx: dict) -> dict:
+    """v3.5: knowledge.search ke liye scope params.
+
+    GROUP question -> chat_id scope: group ki SAARI messages search me aati
+    hain (Telegram group me waise bhi har member sab padh sakta hai —
+    privacy boundary intact hai), isliye 'key kha milega' jaise sawal ka
+    jawab group+channel ke ACTUAL data se aata hai — kisi aur member ne
+    jo process explain kiya wo bhi grounding me aayega.
+
+    DM/private -> user_id scope (pehle jaisa): member ki apni history
+    dusre ko surface nahi hoti.
+    """
+    if user_ctx.get("group"):
+        gid = user_ctx.get("group_id") or user_ctx.get("chat_id")
+        if gid:
+            return {"chat_id": gid}
+    uid = user_ctx.get("user_id")
+    return {"user_id": uid} if uid is not None else {}
+
+
 def answer(question: str, user_ctx: dict) -> dict:
     """Return dict:
         {text, grounded, sources, provider, file: optional, error: optional}
@@ -882,7 +902,7 @@ def answer(question: str, user_ctx: dict) -> dict:
         hits = knowledge.search(
             question,
             limit=10,
-            user_id=user_ctx.get("user_id"),
+            **_search_scope(user_ctx),
         )
 
     # 1. If user is asking for a file by name, deliver it directly.

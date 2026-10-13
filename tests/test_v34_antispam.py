@@ -405,15 +405,22 @@ class GroundingPromptTests(unittest.TestCase):
         self.assertIn("single source of truth", agent.GENERAL_PROMPT)
 
     def test_gate_prompt_is_conservative(self):
+        """v3.5: gate prompt ab BALANCED hai — member-to-member interrupt
+        ban (v3.4 fix intact), PAR general help-question ka jawab bot ka
+        JOB hai (naya v3.5 rule — 'key kha milega' wala live issue)."""
         router = MagicMock()
         router.generate.return_value = "NO"
         bot._GROUP_CONTEXT.clear()
         with patch.object(bot.ai_engine, "get_router", return_value=router):
             bot._should_reply_llm("hello", "x", CHAT)
         prompt = router.generate.call_args.args[0]
-        self.assertIn("staying silent is always safe", prompt)
+        # anti-spam guarantee intact (v3.4)
         self.assertIn("interrupting their", prompt)
-        self.assertIn("Answer YES ONLY", prompt)
+        self.assertIn("talking to EACH OTHER", prompt)
+        # v3.5: helping genuine askers is explicitly the bot's job
+        self.assertIn("Helping such askers is your JOB", prompt)
+        self.assertIn("key kha milega", prompt)
+        self.assertIn("help-question nobody is answering = YES", prompt)
 
 
 class ExplicitRequestTests(unittest.TestCase):

@@ -74,3 +74,15 @@ GATE_TIMEOUT_SECONDS = _int("GATE_TIMEOUT_SECONDS", 10)
 # User ki request: 1 hafta se zyada idle user ki memory delete hone se
 # pehle owner ko ek baar DM notice zaroor jata hai.
 USER_MEMORY_IDLE_DAYS = max(1, _int("USER_MEMORY_IDLE_DAYS", 7))
+# v3.5 MEMORY MANAGEMENT (owner ka live concern: 'data bahot bada ho
+# jayega to agent slow/stuck ho jayega'):
+#   - ek chat ke raw messages ka HARD CAP (iske upar wale purane messages
+#     compact LLM digest — short summary — ban jaate hain, community
+#     facts digest me zinda rehte hain; importance>=0.5 messages kabhi
+#     delete nahi hote)
+#   - per-user Q&A history ka HARD CAP
+#   - DIGEST_ENABLED=0 karne par digest-generation band (compaction bhi
+#     band — sirf importance/TTL wala purana prune chalega)
+MEMORY_MAX_MESSAGES_PER_CHAT = _int("MEMORY_MAX_MESSAGES_PER_CHAT", 2000)
+MEMORY_MAX_QA_PER_USER = _int("MEMORY_MAX_QA_PER_USER", 400)
+DIGEST_ENABLED = _int("DIGEST_ENABLED", 1)

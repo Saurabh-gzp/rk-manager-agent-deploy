@@ -3,6 +3,21 @@
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
 
+## v3.5 SMART LISTENER kit (owner request: silent bot + memory growth)
+
+Owner ke live issues — root cause + fix + tests (304 total pass):
+
+| Issue (live) | Root cause | Fix |
+|---|---|---|
+| **"User kisi se baat nahi kar raha, usko key chahiye — agent ko help karna chahiye... response hi nahi diya"** (screenshot: `key kha milega` 2 baar pucha, bot dono par silent) | v3.4 discipline itna strict ho gaya tha: `kha milega`/`koi btayega` jaise help-shapes regex me the hi nahi, aur gate prompt "When in doubt, answer NO" + gate-LLM error par member ko silence | (1) **Help-seeking question tier** (`triggers.is_help_seeking_question`): `key kha milega`, `kaha se milega`, `crown loader kaise milega`, `koi btayega`, `help chahiye` — ye ab GATE ke bina seedha answer route hote hain (gate failure kabhi genuine help ko swallow nahi kar sakta); (2) gate prompt ab **balanced** — member-to-member interrupt abhi bhi strictly banned, PAR "general help-question nobody is answering = YES, helping is your JOB" |
+| **"Aisa to nahi h na ki only /ask pe hi response de / kisi ka msg hi nahi dekh rha"** | Bot hamesha sab padhta hai (ingest+context) — silent hone ka EHSAS gate-conservatism se aa raha tha | Monitoring intact proof-test: har message (chup rahe tab bhi) `_GROUP_CONTEXT` + `messages` me yaad rehta hai; **exchange guard participant-aware** hai — A<->B ki baat me bot chup, par TEESRA member `key kha milega` puche to turant help (anti-spam budget 4/5min abhi bhi lagta hai) |
+| **"Channel ke hisab se usse baat karna chahiye"** | Search sirf asker ki APNI history me hota tha — dusre members ne jo process/rules group me samjhaye the, wo grounding me kabhi nahi aate the | **Group-scoped search**: group questions `chat_id` scope se search hote hain (Telegram group waise bhi sab members ko dikhta hai) — `key kha milega` ka jawab group ke ACTUAL data (pinned process message, channel posts) se aata hai. DM/private me per-user scope pehle jaisa |
+| **"Chats ka data store hoga to ek din bahot bada ho jayega — agent ko response dene me bahot time ya stuck ho sakta hai"** | Messages + Q&A unbounded grow karte the (M0 512MB + regex scans slow ho jate) | **Memory management** (internet-researched best practices: hard cap + summary compaction + bounded search): (1) `MEMORY_MAX_MESSAGES_PER_CHAT=2000` hard cap — purane messages ek chhota **LLM DIGEST** (short summary, community facts, no PII) ban jaate hain aur raw delete ho jaate hain (`digests` collection, search me `kind=digest` milta hai — info zinda, size bounded); importance>=0.5 messages KABHI delete nahi hote; LLM fail = delete skip (silent loss kabhi nahi); (2) `MEMORY_MAX_QA_PER_USER=400` Q&A cap; (3) search fetch cap 80 + limit 10 waise hi bounded; (4) naye Mongo indexes (qa, digests, chat+date compound). 12h prune cycle + har ~100 messages par cap check — growth HAMESHA O(cap) |
+| **"Agent ko jaha lage uski requirement hai to response de"** | Purana binary: ya strict silence ya spam | 4-tier smart routing: directed (mention/`/ask`/reply) → always; explicit request (`bhejo/dedo`) + **help-question (naya)** → direct grounded answer; sab kuch → balanced LLM gate (context dekh kar khud decide karta hai) |
+
+Bonus: `stats()` me `digests` count; `DIGEST_ENABLED=0` se digest-generation
+band (sirf TTL/importance prune chalega).
+
 ## v3.4 DISCIPLINE AGENT kit (owner request: spam + random files + deleted files)
 
 Owner ke 5 live issues — root cause + fix + tests (281 total pass):
@@ -173,6 +188,9 @@ puuchta hai — LLM ko action claim karne ka mauka hi nahi milta.
 | `USER_MEMORY_IDLE_DAYS` | (optional) Inactive user-memory retention; default 180 days |
 | `REPLY_BUDGET` | (optional) Max undirected replies per chat per window; default 4 |
 | `REPLY_BUDGET_SECONDS` | (optional) Reply-budget window seconds; default 300 |
+| `MEMORY_MAX_MESSAGES_PER_CHAT` | (optional) v3.5: hard cap — raw messages per chat; isse purane messages LLM digest (short summary) me compact hote hain; default 2000 |
+| `MEMORY_MAX_QA_PER_USER` | (optional) v3.5: per-user Q&A history hard cap; default 400 |
+| `DIGEST_ENABLED` | (optional) v3.5: 0 = digest/compaction off (sirf TTL prune); default 1 |
 
 **3. Deploy**:
 - Push this repo to GitHub

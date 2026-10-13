@@ -177,10 +177,17 @@ def _ensure_indexes(db) -> None:
         db["messages"].create_index("user_id")
         db["messages"].create_index("date")
         db["messages"].create_index("importance")
+        # v3.5: chat-scope search + compact ordering compound index
+        db["messages"].create_index([("chat_id", 1), ("date", -1)])
         db["channel_posts"].create_index("channel_id")
         db["channel_posts"].create_index("date")
         db["channel_posts"].create_index("importance")
         db["channel_posts"].create_index([("channel_id", 1), ("message_id", 1)], unique=False)
+        # v3.5: Q&A per-user cap ordering + digests lookups
+        db["qa"].create_index("user_id")
+        db["qa"].create_index([("user_id", 1), ("date", -1)])
+        db["digests"].create_index("chat_id")
+        db["digests"].create_index("created_at")
         db["escalations"].create_index("status")
         db["escalations"].create_index("created_ts")
         db["links"].create_index("group_id")
