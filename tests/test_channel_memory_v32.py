@@ -54,11 +54,13 @@ class IMDBTestCase(unittest.TestCase):
         # module-level state must not leak between tests
         channel_forward._LAST_LINK.clear()
         bot._GROUP_CONTEXT.clear()
+        bot._REPLY_TIMES.clear()
         self.addCleanup(self.p_db.stop)
         self.addCleanup(self.p_owner.stop)
         self.addCleanup(db.invalidate_state_cache)
         self.addCleanup(channel_forward._LAST_LINK.clear)
         self.addCleanup(bot._GROUP_CONTEXT.clear)
+        self.addCleanup(bot._REPLY_TIMES.clear)
 
     def _link_channel(self, username="testchan"):
         db.save_state("channel_id", CHAN)

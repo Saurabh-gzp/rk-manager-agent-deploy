@@ -53,12 +53,14 @@ class IMDBTestCase(unittest.TestCase):
         self.p_owner.start()
         channel_forward._LAST_LINK.clear()
         bot._GROUP_CONTEXT.clear()
+        bot._REPLY_TIMES.clear()
         tg_api.OWN_MSG_IDS.clear()
         self.addCleanup(self.p_db.stop)
         self.addCleanup(self.p_owner.stop)
         self.addCleanup(db.invalidate_state_cache)
         self.addCleanup(channel_forward._LAST_LINK.clear)
         self.addCleanup(bot._GROUP_CONTEXT.clear)
+        self.addCleanup(bot._REPLY_TIMES.clear)
         self.addCleanup(tg_api.OWN_MSG_IDS.clear)
 
     def _link_channel(self, username="testchan"):
@@ -182,43 +184,48 @@ class DeliveryFidelityTests(IMDBTestCase):
         self.assertEqual(fw.call_args.kwargs.get("reply_to_message_id"), 99)
         self.assertEqual(sent, {})  # no re-send happened
 
-    def test_file_id_resend_restores_clickable_key(self):
+    def test_deleted_post_never_resurrected_via_file_id(self):
+        """v3.4 (owner request): post channel se DELETE ho chuka hai to
+        file_id se usko ZINDA nahi karna. Forward+copy dono 'not found'
+        fail → koi send_any_file NAHI, post DB se purge, honest flag."""
         self._link_channel()
         doc = self._seed_post(
             300, caption="KEY: Click me\nContact @oxsidianX",
-            file_name="X.apk", file_type="document",
+            file_name="X.apk", file_type="document", file_id="FILEID",
             entities=[{"type": "text_link", "offset": 5, "length": 8,
                        "url": "https://t.me/rkgamersfeedback/50"}])
-        calls = {}
         with patch.object(tg_api, "forward_message",
-                          return_value={"ok": False, "description": "not found"}), \
+                          return_value={"ok": False,
+                                        "description": "Bad Request: message to forward not found"}), \
                 patch.object(tg_api, "copy_message",
-                             return_value={"ok": False, "description": "not found"}), \
-                patch.object(tg_api, "send_any_file",
-                             side_effect=lambda c, f, t, caption=None, **kw:
-                             calls.update(caption=caption) or {"ok": True}) as sf:
-            agent._deliver_channel_item(CHAT, doc)
-        cap = calls.get("caption") or ""
-        # FULL caption (no 200-char cut) + clickable link restored
-        self.assertIn('<a href="https://t.me/rkgamersfeedback/50">Click me</a>', cap)
-        self.assertIn("Contact @oxsidianX", cap)
-        self.assertEqual(sf.call_args.kwargs.get("parse_mode"), "HTML")
+                             return_value={"ok": False,
+                                           "description": "Bad Request: message to copy not found"}), \
+                patch.object(tg_api, "send_any_file") as sf:
+            r = agent._deliver_channel_item(CHAT, doc)
+        sf.assert_not_called()          # NO file_id resurrection
+        self.assertFalse(r.get("ok"))
+        self.assertTrue(r.get("deleted"))  # honest deleted flag
+        # post purged from records — future lookups will not find it
+        self.assertIsNone(db.get_db()["channel_posts"].find_one(
+            {"channel_id": CHAN, "message_id": 300}))
 
-    def test_long_caption_never_truncated(self):
+    def test_copy_delivery_keeps_full_caption(self):
+        """v3.4: forward fail (generic) par copyMessage deliver karta hai —
+        original ka full caption Telegram khud copy karta hai (koi manual
+        caption rebuild/truncation ka sawal hi nahi hota)."""
         self._link_channel()
-        long_cap = "x" * 1400  # longer than the old [:1000] cut too
-        doc = self._seed_post(301, caption=long_cap, file_name="Y.apk",
+        doc = self._seed_post(301, caption="x" * 1400, file_name="Y.apk",
                               file_type="document")
-        calls = {}
         with patch.object(tg_api, "forward_message",
-                          return_value={"ok": False}), \
+                          return_value={"ok": False, "description": "peer flood"}), \
                 patch.object(tg_api, "copy_message",
-                             return_value={"ok": False}), \
-                patch.object(tg_api, "send_any_file",
-                             side_effect=lambda c, f, t, caption=None, **kw:
-                             calls.update(caption=caption) or {"ok": True}):
-            agent._deliver_channel_item(CHAT, doc)
-        self.assertEqual(len(calls.get("caption") or ""), 1400)
+                             return_value={"ok": True,
+                                           "result": {"message_id": 9}}) as cm, \
+                patch.object(tg_api, "send_any_file") as sf:
+            r = agent._deliver_channel_item(CHAT, doc)
+        self.assertTrue(r.get("ok"))
+        cm.assert_called_once()
+        sf.assert_not_called()
 
     def test_html_parse_error_falls_back_to_plain(self):
         with patch.object(tg_api, "api",

@@ -60,11 +60,23 @@ SYSTEM_PROMPT = (
     "senior. Address members as 'bhai'/'aap' politely. NEVER call a mere "
     "member 'boss' — that word is reserved for the OWNER alone. No sarcasm, "
     "no mocking, no over-familiar slang. Warm and friendly — but polished. "
-    "Below is context learned from the channel + group. Use it as background "
-    "knowledge, but ALWAYS answer in your own words — NEVER copy-paste lines "
+    "Below is context learned from the channel + group. "
+    "GROUNDING (CRITICAL — never violate): the context below is the "
+    "SINGLE SOURCE OF TRUTH about this community. For ANYTHING about "
+    "files, apps, loaders, APKs, keys, links, panels, configs, channel "
+    "posts, members, or past events, answer ONLY from the given context "
+    "(channel data, Recent chat log, COMMUNITY FACTS). Read the user's "
+    "message carefully and answer EXACTLY what they asked — never answer "
+    "a neighboring topic or paste irrelevant context. If the context "
+    "does not contain the answer, say honestly in the user's language "
+    "that you don't have that record right now ('abhi mere paas iski "
+    "jaankari nahi hai') — NEVER substitute your own general knowledge "
+    "for community content, and NEVER invent an app name, key, file "
+    "name, post number, or link. General knowledge is allowed ONLY for "
+    "questions that are clearly NOT about this community's content "
+    "(math, science, general tech, general trivia). "
+    "ALWAYS answer in your own words — NEVER copy-paste lines "
     "from the context verbatim, even if the user seems to quote them. "
-    "If the context does not contain the answer, use your own general "
-    "knowledge instead of refusing. "
     "Never invent a specific user's past messages or personal history: if "
     "asked about someone's past conversation and the context has no record "
     "of it, say naturally in the user's language that you don't have that "
@@ -210,6 +222,13 @@ GENERAL_PROMPT = (
     "beyond it. The COMMUNITY FACTS block (owner/group/channel identity) "
     "is verified — use it for 'owner kaun / channel kaun' questions and "
     "never claim you lack that record. "
+    "GROUNDING (CRITICAL): for anything about this community's files, "
+    "apps, loaders, APKs, keys, links, channel posts or members, answer "
+    "ONLY from the context given — channel data is the single source of "
+    "truth. If the context lacks it, say honestly you don't have that "
+    "record right now; NEVER invent an app name, key, file name, post "
+    "number or link from general knowledge. General knowledge is only "
+    "for questions clearly unrelated to the community's content. "
     "Never claim to know a user's past conversation unless "
     "that information is explicitly present in context. If asked about a "
     "person's past messages and there is no matching context, say you do "
@@ -326,6 +345,20 @@ _VAGUE_FILE_WORDS = {
     "login", "problem", "fix", "solve", "error", "issue", "9999",
 }
 
+# v3.4: file-TOPIC context — in patterns ke bina file_name match bhi
+# file offer NAHI karta ('twitter pe video dekho' casual chatter hai,
+# request nahi). Problem-report words + file/app words. Standalone
+# 'nhi/nahi' GENERIC nahi rakha ('pasand nahi hai' casual hai) — sirf
+# 'nhi ho raha / nahi chalta' jaise problem shapes.
+_FILE_TOPIC_RE = re.compile(
+    r"\b(problem|error|issue|bug|crash|stuck|glitch|fix|solve|kharab|"
+    r"install|login|account|key|keys|password|version|update|download|"
+    r"apk|apkm|app|loader|loadar|panel|config|cfg|file|konsa|konsi)\b"
+    r"|\b(nhi|nahi|nai)\s+(ho|chal|chalta|hota|hua|hu|raha|rhi|rha)\b"
+    r"|\b(ho|chal|chalta)\s+(raha|rhi|ra|rha)\b",
+    re.IGNORECASE,
+)
+
 
 def _best_file_offer(hits: list[dict], question: str) -> dict | None:
     """v3.3 relevance-gated file offer. The old rule (answer mentions
@@ -339,7 +372,14 @@ def _best_file_offer(hits: list[dict], question: str) -> dict | None:
           specific token hits the caption/body ('arvon' -> Avron post).
     Vague asks ('key dedo', 'file bhejo') deliver nothing — the LLM asks
     which one. URLs are stripped first so a pasted channel link's username
-    never masquerades as a file name."""
+    never masquerades as a file name.
+
+    v3.4: path (a) me bhi ek CONTEXT precondition hai — file_name match
+    tabhi offer karta hai jab message file ke bare me ho: request
+    (bhejo/dedo/app do...), problem report (login nahi ho rha / error /
+    crash...), ya key wala sawal. 'twitter pe ye video dekho' jaisi
+    casual chatter pe token 'twitter' com_twitter...apkm se match ho
+    jata tha aur bot random APK deliver kar deta tha — ab nahi."""
     q = question or ""
     if not hits:
         return None
@@ -355,6 +395,9 @@ def _best_file_offer(hits: list[dict], question: str) -> dict | None:
     specific = [t for t in tokens if t not in _VAGUE_FILE_WORDS]
     if not specific:
         return None  # 'bhai key dedo' — too vague, no delivery
+    # v3.4: message file-topic me hai? (request / problem / key-sawal)
+    if not (_looks_like_file_request(q) or _FILE_TOPIC_RE.search(q)):
+        return None
 
     import difflib
 
@@ -747,9 +790,31 @@ def _generate_answer(prompt: str, system: str, user_ctx: dict) -> str:
         prompt, system=system, max_tokens=config.ANSWER_MAX_TOKENS)
 
 
+def _is_not_found(r: dict | None) -> bool:
+    """Telegram ne 'message to forward/copy not found' bola — matlab post
+    channel se DELETE ho chuka hai (ya number galat hai)."""
+    desc = str((r or {}).get("description") or "").lower()
+    return "not found" in desc or "message id" in desc
+
+
+def _purge_deleted_post(channel_id: int | None, message_id: int | None) -> None:
+    """v3.4: live channel se post gayab mila to DB se bhi hata do.
+
+    Wajah (owner ka live issue): 'jo channel se delete ho chuka hai vo
+    file bhi bhej deta hai'. Telegram Bot API post-deletion event nahi
+    deta, par delivery ke waqt forward/copy ke 'not found' error se
+    deletion LIVE detect ho jata hai. Post ko channel_posts se nikaal
+    dete hain to wo phir kabhi search/offer/context me nahi aayega."""
+    try:
+        if channel_id and message_id:
+            knowledge.purge_post(int(channel_id), int(message_id))
+    except Exception:
+        pass
+
+
 def _deliver_channel_item(chat_id: int, item: dict,
                           reply_to: int | None = None) -> dict:
-    """Deliver a channel item to a chat with FULL fidelity (v3.3).
+    """Deliver a channel item to a chat (v3.4).
 
     Order of preference:
       1. REAL forwardMessage — perfect clone: the original caption with
@@ -757,18 +822,22 @@ def _deliver_channel_item(chat_id: int, item: dict,
          bold/underline styling, file, everything. Reply-linked to the
          requester.
       2. copyMessage — same fidelity without the 'Forwarded from' header.
-      3. file_id resend — LAST resort (post deleted from channel):
-         caption rebuilt as HTML with stored entities so hidden text_link
-         URLs (the KEY links) are still clickable. Caption is NEVER
-         truncated — the owner's 'cut kr diya text and key' bug.
-    Contacts (vCards) have no file_id — forwarded, then sent as a card.
-    """
+    v3.4 REMOVED: the old step 3 (stored file_id resend). Wo deleted
+    posts ko 'zinda' kar deta tha — owner ka live issue: 'jo channel se
+    delete ho chuka hai vo file bhi bhej deta hai'. Ab delivery SIRF
+    live channel se hoti hai: agar post wahan nahi hai, to honestly
+    'delete ho chuka hai' bola jata hai aur post DB se purge hota hai
+    ({"ok": False, "deleted": True} return hota hai — caller honest
+    message bhejta hai).
+    Contacts (vCards) have no file_id — forwarded; on forward success a
+    card is never re-sent (the forward IS the card)."""
     ch = item.get("channel_id") or links.get_channel_id()
     mid = item.get("message_id")
-    # 1-2. forward / copy from the live channel — entities survive intact
-    # (forward_message_tracked: the delivery counts as OUR message, so
-    # 'apne message delete karo' can clean it up too)
     if ch and mid:
+        # forward/copy from the LIVE channel — post deleted ho to dono
+        # fail honge; entities intact (forward_message_tracked: delivery
+        # counts as OUR message, so 'apne message delete karo' can clean
+        # it up too)
         r = tg_api.forward_message_tracked(chat_id, ch, mid,
                                            reply_to_message_id=reply_to)
         if r.get("ok"):
@@ -777,34 +846,15 @@ def _deliver_channel_item(chat_id: int, item: dict,
                                 reply_to_message_id=reply_to)
         if r.get("ok"):
             return r
-    file_id = item.get("file_id")
-    if file_id:
-        # 3. stored file_id resend — FULL caption, entities restored as HTML
-        text = item.get("caption") or item.get("text") or "Channel se file"
-        ents = item.get("entities") or []
-        html_cap = fmt.entity_html(text, ents) if ents else None
-        if html_cap:
-            r = tg_api.send_any_file(chat_id, file_id,
-                                     item.get("file_type") or "document",
-                                     caption=html_cap,
-                                     reply_to_message_id=reply_to,
-                                     parse_mode="HTML")
-            if r.get("ok"):
-                return r
-            desc = str(r.get("description") or "").lower()
-            if "parse" in desc or "entity" in desc:
-                r = tg_api.send_any_file(chat_id, file_id,
-                                         item.get("file_type") or "document",
-                                         caption=fmt.markdown_to_html(text),
-                                         reply_to_message_id=reply_to,
-                                         parse_mode="HTML")
-                if r.get("ok"):
-                    return r
-        return tg_api.send_any_file(chat_id, file_id,
-                                    item.get("file_type") or "document",
-                                    caption=text,
-                                    reply_to_message_id=reply_to)
-    # Contact / forward-only post
+        # v3.4: live channel me post nahi mila — deleted confirm. Purge
+        # + honest flag (koi file_id resurrection NAHI hoga).
+        if _is_not_found(r):
+            _purge_deleted_post(ch, mid)
+            return {"ok": False, "deleted": True,
+                    "description": "post deleted from channel"}
+        return {"ok": False,
+                "description": r.get("description") or "delivery failed"}
+    # Contact / forward-only post without a live message id: send the card.
     contact = item.get("contact") or {}
     if contact.get("phone_number"):
         return tg_api.send_contact(
@@ -840,8 +890,12 @@ def answer(question: str, user_ctx: dict) -> dict:
     #    reply-linked. KEY requests ('arvon ka key kya hai') continue to
     #    the LLM too — the answer text adds the actual key + link, and the
     #    file follows as a forward with its clickable 'KEY: Click me'.
+    #    v3.4: delivery FAIL ho to honest jawab — deleted post par
+    #    'delete ho chuka hai' (post DB se bhi purge ho chuka), aur
+    #    baaki failures par LLM ko galat file claim se bachane wala FACT.
     is_key_request = bool(re.search(r"\bkey\b", question or "",
                                     re.IGNORECASE))
+    delivery_failed_mid: int | None = None
     if _looks_like_file_request(question):
         file_offer = _best_file_offer(hits, question)
         if file_offer and not is_key_request:
@@ -851,11 +905,25 @@ def answer(question: str, user_ctx: dict) -> dict:
                                           reply_to=user_ctx.get("message_id"))
                 if r.get("ok"):
                     return {
-                        "text": "Bhej diya — channel se 📎",
+                        "text": "Bhej diya — channel se 📦",
                         "grounded": True,
                         "sources": 1,
                         "file_sent": True,
                     }
+                if r.get("deleted"):
+                    # v3.4: post channel se delete ho chuka — honest batao,
+                    # DB se bhi hata diya gaya hai (no file_id resurrection).
+                    return {
+                        "text": ("❌ Ye post channel se **delete ho chuka hai** — "
+                                 "ab wo mere paas nahi hai (record se bhi hata "
+                                 "diya). Boss channel par naya post dalenge "
+                                 "tab milegi 🙏"),
+                        "grounded": True,
+                        "sources": 0,
+                        "file_deleted": True,
+                    }
+                # some other delivery failure — do not re-offer this post
+                delivery_failed_mid = file_offer.get("message_id")
     else:
         file_offer = None
 
@@ -948,9 +1016,15 @@ def answer(question: str, user_ctx: dict) -> dict:
         # or (b) a specific question token hits the FILE NAME — never on a
         # loose text match. Delivery is a reply-linked FORWARD (entities +
         # clickable KEY links intact) and the caption is NEVER truncated.
+        # v3.4: delivery pehle hi FAIL ho chuki post dobara offer nahi hogi
+        # (delivery_failed_mid); purged/stale post ho to _deliver_answer ke
+        # waqt honest 'delete ho chuka' message final safety net hai.
         fo = _best_file_offer(hits, question)
+        if fo and fo.get("message_id") == delivery_failed_mid:
+            fo = None
         if not fo and grounded_offer:
-            fo = grounded_offer  # corrected link -> also deliver that post
+            if grounded_offer.get("message_id") != delivery_failed_mid:
+                fo = grounded_offer  # corrected link -> also deliver that post
         if fo:
             result["file_offer"] = fo
         return result
@@ -996,17 +1070,33 @@ def answer(question: str, user_ctx: dict) -> dict:
 
 
 _FILE_REQUEST_RE = re.compile(
-    r"\b(file|files|apk|apkm|app|loader|loadar|key|cheez|download|send|"
-    r"document|pdf|image|photo|video|audio|zip|mod|config|cfg|panel|"
-    r"bhejo|bhej|bhejdo|forward|forword|dedo|dijiye|dena|mila|dikhao|"
-    r"chahiye|chahiye\?*)\b"
-    r"|\b(de|do)\s+(do|dena|dijiye)\b"
-    r"|\b(app|file|loader|key|link|photo|video|post|cheez)\s+do\b",
+    # v3.4: precise ask-nouns — 'key'/'apk' wale messages aksar file ke
+    # bare me hote hain (word-boundary se 'okay' kabhi match nahi hota).
+    r"\b(apk|apkm|key)\b"
+    # ask-verbs — user kuch MANG raha hai (bhejo/dedo/dikhao/chahiye...)
+    r"|\b(bhejo|bhej|bhejdo|bhej\s?do|bhej\s?dena|dedo|de\s?do|dijiye|"
+    r"do\s?na|dena|dikhao|dikha\s?do|chahiye|"
+    r"mila\s?do|mila\s?dena|download)\b"
+    # 'send/forward' + kar-na form — bare 'send' noun ho sakta hai
+    # ('send nahi hua uska msg'), isliye verb combo chahiye.
+    r"|\b(send|forward|forword)\s*"
+    r"(karo|kro|krdo|kardo|kar|kru|karna|krna|dena|dedo|dijiye|do)\b"
+    # noun + ask-verb combo — 'app do', 'loader dena', 'photo dedo'
+    r"|\b(app|apps|file|files|loader|loadar|link|photo|video|post|cheez|"
+    r"panel|config|cfg|doc|document|mod)\s+"
+    r"(do|do\s?na|dena|dedo|de\s?do|dijiye)\b"
+    r"|\b(de|do)\s+(do|dena|dijiye)\b",
     re.IGNORECASE,
 )
 
 
 def _looks_like_file_request(q: str) -> bool:
     """v3.3: word-boundary matching ('key' no longer hits 'okay') plus
-    the real Hinglish request shapes ('app do', 'wala app do', 'dedo')."""
+    the real Hinglish request shapes ('app do', 'wala app do', 'dedo').
+
+    v3.4 TIGHTENING (live issue: 'koi bhi file utha ke bhej deta hai'):
+    bare nouns (photo, video, image, send, mila...) akela ab file-request
+    NAHI hote — 'twitter pe video dekho' jaisi chatter pe random APK
+    deliver ho jata tha. Ab ya to ask-verb chahiye (bhejo/dedo/chahiye),
+    ya key/apk jaisa precise noun, ya noun+do combo."""
     return bool(_FILE_REQUEST_RE.search(q or ""))

@@ -160,6 +160,75 @@ def _is_private_admin(uid: int) -> bool:
 # past-event questions — the model sees what actually happened).
 _GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
 
+# v3.4 anti-spam: timestamps (per chat) of the bot's UNDIRECTED replies —
+# answers the bot gave on its own judgment (LLM-gate YES / request words),
+# not replies to /ask, @mentions or replies-to-the-bot (those are always
+# served). Owner bhi exempt hai. Budget: REPLY_BUDGET replies per
+# REPLY_BUDGET_SECONDS (default 4 / 300s) — '2 users ki baat-cheet me
+# bot bahot message krta hai' issue ka hard backstop.
+_REPLY_TIMES: dict[int, deque] = defaultdict(lambda: deque(maxlen=32))
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+_REPLY_BUDGET = _int_env("REPLY_BUDGET", 4)
+_REPLY_BUDGET_SECONDS = _int_env("REPLY_BUDGET_SECONDS", 300)
+
+
+def _reply_budget_ok(chat_id: int) -> bool:
+    """True jab tak undirected-reply budget bacha hai (and records this one)."""
+    now = time.time()
+    dq = _REPLY_TIMES[chat_id]
+    while dq and now - dq[0] > _REPLY_BUDGET_SECONDS:
+        dq.popleft()
+    if len(dq) >= _REPLY_BUDGET:
+        log(f"reply budget exhausted for chat {chat_id} — staying silent")
+        return False
+    dq.append(now)
+    return True
+
+
+def _member_exchange_active(chat_id: int) -> bool:
+    """v3.4: True when two members are ACTIVELY talking to each other and
+    the bot has not been part of the recent exchange.
+
+    Rule: the last two remembered messages are both from members, from
+    DIFFERENT users, and NONE of the last four messages is from the bot.
+    Tab bot chup rehta hai — na gate call, na answer, na forward. Ye
+    'do users ki baat-cheet me bahot message' issue ka direct fix hai:
+    seedha gate pahunchne se pehle hi silence ho jata hai (API call bhi
+    bachti hai). Bot ke naam/mention/reply pe ye guard lagu NAHI hota."""
+    try:
+        ctx = _GROUP_CONTEXT.get(chat_id)
+        if not ctx:
+            return False
+        # NOTE: the CURRENT message is already remembered as the last entry
+        # (handle_message remembers right after ingest). Analyse the prior
+        # conversation WITHOUT it.
+        prior = list(ctx)[:-1]
+        if len(prior) < 2:
+            return False
+        last2 = prior[-2:]
+        if any(m.get("is_bot") for m in last2):
+            return False
+        u1, u2 = last2[0].get("uid"), last2[1].get("uid")
+        if u1 is not None and u2 is not None and u1 == u2:
+            return False  # ek hi member ka monologue — gate decide karega
+        if u1 is None or u2 is None:
+            if (last2[0].get("name") or "") == (last2[1].get("name") or ""):
+                return False
+        # bot recent exchange me tha to interrupt mat karo flag ke bina
+        if any(m.get("is_bot") for m in prior[-4:]):
+            return False
+        return True
+    except Exception:
+        return False
+
 
 # Conversational moderation requests ("isko mute kar do", "ye msg delete kr").
 # Members can NEVER trigger actions on their word — owner only. The owner’s
@@ -588,12 +657,13 @@ def _download_media(msg: dict) -> tuple[list[dict], str | None]:
 
 
 def _remember(chat_id: int, name: str, text: str,
-              is_bot: bool = False, is_owner: bool = False) -> None:
+              is_bot: bool = False, is_owner: bool = False,
+              uid: int | None = None) -> None:
     text = (text or "").strip()
     if chat_id and text:
         _GROUP_CONTEXT[chat_id].append(
             {"name": name, "text": text[:300], "is_bot": is_bot,
-             "owner": is_owner})
+             "owner": is_owner, "uid": 0 if is_bot else uid})
 
 
 def _remember_qa(uid: int, chat_id: int, question: str, answer: str | None,
@@ -707,25 +777,35 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
         lines.append(who + ": " + m["text"])
     convo = "\n".join(lines) if lines else "(no earlier messages)"
     role = " (group OWNER)" if is_owner else ""
+    # v3.4: gate ab CONSERVATIVE hai — default NO. Purana prompt 'asks a
+    # question or requests something you could help with' bhi YES bol deta
+    # tha, isliye do members ki on-topic baat-cheet me bhi bot reply kar
+    # deta tha (live issue: '2 users ke baat-cheet me bahot message krta
+    # hai'). Ab YES sirf tab jab message CLEARLY bot ke liye ho.
     prompt = (
         "Recent group conversation:\n" + convo + "\n\n"
         + "New message from " + name + role + ": " + text + "\n\n"
-        + "Should RK Manager (the group's AI assistant -- that's YOU) reply to "
-        + "this new message? Answer YES if:\n"
-        + "- it is addressed to you (RK Manager / manager / bot, any spelling), or\n"
-        + "- it is a follow-up to your previous message, or\n"
-        + "- it asks a question or requests something you could help with "
-        + "(mods, loaders, APKs, BGMI, downloads, group info), or\n"
-        + "- it clearly expects your response.\n"
-        + "Answer NO if:\n"
-        + "- it is banter, jokes, or chatter between members, or\n"
-        + "- it is directed at another member (a reply to them, or "
-          "mentioning them), or\n"
+        + "Should RK Manager (the group's AI manager -- that's YOU) reply to "
+        + "this new message?\n"
+        + "Answer YES ONLY when the message is CLEARLY meant for you:\n"
+        + "- it addresses you by name (RK Manager / manager / bot, any "
+        + "spelling), or\n"
+        + "- it is a direct follow-up to YOUR own previous message, or\n"
+        + "- it is an explicit command or request for the group manager "
+        + "(mute/delete/ban/scan/group status/permissions/forward a post/"
+        + "ask for an app, loader, key or file), or\n"
+        + "- it is from the OWNER and clearly expects your response.\n"
+        + "Answer NO when:\n"
+        + "- two members are talking to EACH OTHER — banter, gaming talk, "
+        + "or a question asked of ANOTHER member — even if the topic is "
+        + "loaders/APKs/keys and you COULD answer: interrupting their "
+        + "conversation is forbidden, or\n"
         + "- it is a statement or narration NOT addressed to you — someone "
-          "sharing info, reacting, or answering ANOTHER member (e.g. 'kal "
-          "diya tha ...', 'khela hu', 'acha', 'ye mast hai', 'so gya tha') "
-          "— even if the topic touches something you said before, or\n"
+        "sharing info, reacting, or answering ANOTHER member (e.g. 'kal "
+        "diya tha ...', 'khela hu', 'acha', 'ye mast hai', 'so gya tha') "
+        "— even if the topic touches something you said before, or\n"
         + "- it is just a greeting, thanks, ok, hmm with nothing else.\n"
+        + "When in doubt, answer NO — staying silent is always safe.\n"
         + "Answer with exactly one word: YES or NO."
     )
     try:
@@ -1106,15 +1186,17 @@ def handle_message(msg) -> None:
         _who = user.get("first_name") or user.get("username") or "member"
         _remember(chat_id, _who,
                   text or " ".join(_MEDIA_KIND_LABEL[k] for k in _media_kinds(msg)),
-                  is_owner=(uid == config.OWNER_CHAT_ID))
+                  is_owner=(uid == config.OWNER_CHAT_ID), uid=uid)
 
-        # Deterministic REAL channel-content delivery — t.me link, post
-        # number, 'latest', ya 'vo wala message bhejo'. Ye sabse PEHLE
-        # chalta hai (teach/LLM se bhi pehle): forwardMessage sach me hota
-        # hai, LLM kabhi sirf 'nikal kar pahuncha deta hu' bol nahi sakta.
+        # Remember any channel-post link seen in this chat (even unhandled)
+        # so later 'vo wala message bhejo' requests can resolve it.
         channel_forward.note_link_in_text(chat_id, text)
-        if channel_forward.handle_forward_request(msg, chat_id, uid):
-            return
+        # v3.4: natural-language channel delivery ('crown loader bhejo', link
+        # + intent, 'latest post dikhao') ab DIRECTEDNESS ke BAAD chalta hai.
+        # Pehle ye undirected chatter pe bhi fire kar deta tha — 2 members
+        # apas me 'twitter wala app de' types baat karte the aur bot beech
+        # me random file forward kar deta tha ('bina samjhe kuch bhi bhej
+        # deta hai'). /get command explicit hai — wo pehle hi rahega.
         if channel_forward.handle_get_command(msg, chat_id, uid):
             return
 
@@ -1181,13 +1263,25 @@ def handle_message(msg) -> None:
             if text.startswith("/"):
                 return
             # A reply addressed to another member, or mentioning someone
-            # else: not for the bot — stay silent.
-            if reply_to and not replied_to_bot:
+            # else: not for the bot — stay silent. (Owner exempt — owner
+            # kisi message pe reply karke 'isko delete/mute karo' bol sakta
+            # hai; wo mod-synthesis path me parse hota hai.)
+            if reply_to and not replied_to_bot and uid != config.OWNER_CHAT_ID:
                 return
             if _mentions_other_user(text, entities):
                 return
-            # Obvious question/request: answer directly (cheap path).
-            if not triggers.is_question_or_request(text):
+            # v3.4: do members LAGBAG (last 2 alag members, bot last 4 me
+            # nahi) ek doosre se baat kar rahe hain — bot interrupt NAHI
+            # karega. Na gate call, na answer, na forward. Ye '?' wale
+            # user-to-user questions ka direct fix hai.
+            if _member_exchange_active(chat_id):
+                return
+            # v3.4: sirf EXPLICIT requests (bhejo/dedo/app do/help/scan
+            # karo) direct route hote hain. '?' ya 'kya/kab/kyu' shuru
+            # hone wale questions ab LLM gate se honge — wo context dekh
+            # kar decide karta hai ki sawal bot ke liye hai ya member
+            # dusre member se puch raha hai (live spam ka root cause).
+            if not triggers.is_explicit_request(text):
                 # Plain chatter ("hyy", "ok"): never needs a reply.
                 if triggers.is_plain_chatter(text):
                     return
@@ -1209,6 +1303,19 @@ def handle_message(msg) -> None:
                     return
             else:
                 prefetch_box = _start_answer_prefetch(text, uid)
+            # v3.4 anti-spam budget: undirected replies (gate-YES ya request
+            # words) per chat limited. /ask, mention, reply-to-bot aur owner
+            # ke messages hamesha serve hote hain — budget sirf bot ke apne
+            # famaane-farmaan par diye gaye jawabo pe lagta hai.
+            if uid != config.OWNER_CHAT_ID and not _reply_budget_ok(chat_id):
+                return
+
+        # v3.4 (moved): natural-language channel-content delivery — ab sirf
+        # QUALIFIED messages (directed / gate-approved / explicit request)
+        # ke liye. forwardMessage sach me hota hai; LLM kabhi sirf 'nikal
+        # kar pahuncha deta hu' bol nahi sakta.
+        if channel_forward.handle_forward_request(msg, chat_id, uid):
+            return
 
         # Conversational moderation: members can NEVER trigger actions on
         # their word — only the owner can. The owner's spoken request becomes
@@ -1346,12 +1453,25 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
     # If there's a file offer, send it (files, media, contacts — channel se)
     # v3.3: delivery REPLY-links to the request and preserves the original
     # caption's clickable links (forward-first, never truncated).
+    # v3.4: delivery FAIL par honest batao — deleted post ho to
+    # 'channel se delete ho chuka hai' (post DB se bhi purge ho jata hai).
+    # Koi file_id resurrection NAHI — live channel me jo nahi hai wo
+    # bheja nahi jayega (owner ka live issue fix).
     fo = res.get("file_offer") if isinstance(res, dict) else None
     if isinstance(fo, dict):
         try:
-            agent._deliver_channel_item(chat_id, fo, reply_to=reply_to)
+            r = agent._deliver_channel_item(chat_id, fo, reply_to=reply_to)
+            if not r.get("ok") and r.get("deleted"):
+                tg_api.send_message(
+                    chat_id,
+                    "❌ Ye post channel se **delete ho chuka hai** — isliye "
+                    "bhej nahi paya. Mere records se bhi hata diya hai.",
+                    reply_to_message_id=reply_to)
+            elif not r.get("ok"):
+                log("file_offer delivery failed:",
+                    r.get("description") or "unknown")
         except Exception:
-            pass
+            log("file_offer delivery error:", traceback.format_exc())
 
 
 # ---------------- run modes ----------------

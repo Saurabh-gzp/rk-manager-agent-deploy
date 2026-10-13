@@ -321,6 +321,24 @@ def get_post(channel_id: int, message_id: int) -> dict | None:
         return None
 
 
+def purge_post(channel_id: int, message_id: int) -> bool:
+    """v3.4: post ko records se hata do — live channel me wo DELETE ho
+    chuka hai (forward/copy 'not found' se confirm hua).
+
+    Owner ka live issue: 'jo channel se delete ho chuka hai vo file bhi
+    bhej deta hai'. Bot API deletion event nahi deta, isliye delivery
+    ke waqt detection + removal hota hai. Purge ke baad wo post phir
+    search/context/file-offer me kabhi nahi aayega. Returns True if removed."""
+    if not channel_id or not message_id:
+        return False
+    try:
+        r = get_db()["channel_posts"].delete_many({
+            "channel_id": int(channel_id), "message_id": int(message_id)})
+        return bool(getattr(r, "deleted_count", 0))
+    except Exception:
+        return False
+
+
 # --- prune / cleanup ---
 
 def _is_stale_message(d: dict, now: float) -> bool:

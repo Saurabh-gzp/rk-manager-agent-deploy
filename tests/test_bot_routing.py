@@ -46,12 +46,17 @@ class BotRoutingTests(unittest.TestCase):
         answer.assert_not_called()
 
     def test_natural_question_reaches_agent_and_answerer(self):
+        # v3.4: undirected '?'-questions no longer bypass the reply gate
+        # (that was the '2 users ki baat-cheet me bahot message' root cause).
+        # They reach the agent only when the LLM gate approves them.
         patches = self._base_patches()
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+                patch.object(bot, "_should_reply_llm", return_value=True) as gate, \
                 patch.object(bot.agent, "answer", return_value={
                     "text": "It starts at 6.", "grounded": True,
                 }) as answer:
             bot.handle_message(message("What time does it start?"))
+        gate.assert_called_once()
         answer.assert_called_once()
         self.assertEqual(answer.call_args.args[0], "What time does it start?")
         self.assertEqual(answer.call_args.args[1]["user_id"], 123)
@@ -60,6 +65,7 @@ class BotRoutingTests(unittest.TestCase):
         patches = self._base_patches()
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
                 patches[5] as send, \
+                patch.object(bot, "_should_reply_llm", return_value=True), \
                 patch.object(bot.agent, "answer", return_value={
                     "text": "Mera jawab ye hai.", "grounded": False,
                 }), patch.object(bot.escalation, "open_escalation") as esc:

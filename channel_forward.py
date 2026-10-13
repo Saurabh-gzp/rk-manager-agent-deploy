@@ -136,10 +136,13 @@ def _search_posts_by_tokens(tokens: list[str], channel_id: int,
 
 
 # Forward/deliver intent words (Hinglish + English).
+# v3.4: 'mujhe'/'mail' HATA diye — 'mujhe ye link pasand aaya' jaisi
+# casual baat bhi auto-forward trigger kar deti thi. Ab intent ek REAL
+# ask hona chahiye (bhejo/dedo/chahiye/dikhao...).
 _INTENT_RE = re.compile(
     r"\b(forward|forword|forwrd|bhej|bhejo|bhejna|bhejdo|bhej\s?do|bhej\s?dena|"
     r"dedo|de\s?do|dena|dikhao|dikha|dikhana|dikha\s?do|send|nikal|nikaal|"
-    r"nikal\s?do|chahiye|mujhe|mail|mila\s?do|lana|la\s?do|do\s?na)\b"
+    r"nikal\s?do|chahiye|mila\s?do|lana|la\s?do|do\s?na)\b"
     # v3.3: '<thing> do' — 'twitter wala app do', 'key do', 'photo do'
     r"|\b(app|file|loader|key|link|photo|video|post|cheez|loadar)\s+do\b",
     re.IGNORECASE,
@@ -231,6 +234,11 @@ def _forward_post(chat_id: int, from_chat_id: int, message_id: int,
     and Telegram refuses to edit forwarded messages). Only genuine
     failures produce a spoken reason.
 
+    v3.4: 'not found' (post channel se DELETE ho chuka) par post ko
+    records se PURGE kar dete hain — agli baar search/offer me wo post
+    kabhi nahi aayega. Owner ka live issue: 'jo channel se delete ho
+    chuka hai vo file bhi bhej deta hai'.
+
     Returns True when the request is fully handled (caller must stop).
     """
     if _needs_preview_kill(_get_post_doc(from_chat_id, message_id)):
@@ -257,8 +265,15 @@ def _forward_post(chat_id: int, from_chat_id: int, message_id: int,
     if c.get("ok"):
         return True
     if "not found" in low or "message id" in low:
-        _say_reply(chat_id, "❌ Ye post channel me nahi mila — delete ho chuka "
-                            "hoga ya number galat hai.", reply_to)
+        # v3.4: post live channel me nahi hai — purge + honest reason.
+        try:
+            from knowledge import purge_post
+            purge_post(from_chat_id, message_id)
+        except Exception:
+            pass
+        _say_reply(chat_id, "❌ Ye post channel se delete ho chuka hai — "
+                            "isliye forward nahi ho paya (mere records se "
+                            "bhi hata diya).", reply_to)
     else:
         _say_reply(chat_id, f"❌ Forward nahi ho paya: {desc or 'unknown error'} "
                             "— bot channel ka admin hona chahiye.", reply_to)

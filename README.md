@@ -3,6 +3,21 @@
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
 
+## v3.4 DISCIPLINE AGENT kit (owner request: spam + random files + deleted files)
+
+Owner ke 5 live issues — root cause + fix + tests (281 total pass):
+
+| Issue (live) | Root cause | Fix |
+|---|---|---|
+| **"2 users ke baat-cheet me bahot message krta hai"** | `?`/question-words (`kya/kab/kyu`) seedha cheap-path se answer de dete the — LLM gate bypass; gate prompt khud "topic relevant hai to YES" bolta tha | (1) **Member-exchange guard**: last 2 messages alag members ke + bot last-4 me nahi = bot chup (na gate, na answer, na forward); (2) `?`-questions ab hamesha **conservative gate** se — "Answer YES ONLY when CLEARLY meant for you... staying silent is always safe"; (3) sirf **explicit requests** (`app do`, `bhejo`, `help`) direct route; (4) **reply budget** — undirected replies max 4/5min per chat (mention/`/ask`/reply-to-bot/owner exempt) |
+| **"Bina user ke message samjhe kuch bhi bhej deta hai"** | `channel_forward` handler directedness-check se PEHLE chalta tha — undirected chatter pe bhi auto-forward; `_FILE_REQUEST_RE` me `photo/video/send/mila` bare nouns trigger the; `_INTENT_RE` me `mujhe` intent tha | Natural-language forward ab **directed/gate-approved ke BAAD** chalta hai; file-request me ab **ask-verb ya key/apk ya noun+do** chahiye (`twitter pe video dekho` = chatter, `video dedo` = request); `mujhe/mail` intent list se hataye; `_best_file_offer` me **file-topic precondition** (request/problem/key) |
+| **"Jo channel se delete ho chuka hai wo file bhi bhej deta hai"** | `file_id` resend fallback deleted posts ko 'zinda' kar deta tha (Telegram file_id delete ke baad bhi kaam karta hai) | **file_id resurrection REMOVED** — delivery ab sirf LIVE channel se (forward → copy); `not found` = post deleted → **DB se purge** + honest "delete ho chuka hai" message. Post phir kabhi search/offer/context me nahi aata |
+| **"Har baar galat response — channel ke data ke base pe dena chahiye"** | SYSTEM_PROMPT khud kehta tha: "context me answer nahi to **general knowledge use karo**" | Prompts me **GROUNDING rule**: channel/group data = SINGLE SOURCE OF TRUTH; community content (files/keys/links/posts/members/past events) par general knowledge substitute **banned**; honest "abhi mere paas ye record nahi hai" |
+| **"Galat post link / random number"** | (v3.3 se residual) post number LLM guess | `_ground_post_links` + `post_exists` checks unchanged; purged (deleted) posts ab context me hi nahi aate |
+
+Bonus: owner ab kisi message pe REPLY karke bol sakta hai "isko delete karo"
+(pehle reply-to-member wale messages silently drop ho jate the).
+
 ## v3.3 POWER AGENT kit (owner request: tools + formatting + intelligence)
 
 Owner ke 5 live issues — root-cause + fix + tests (255 total pass):
@@ -156,6 +171,8 @@ puuchta hai — LLM ko action claim karne ka mauka hi nahi milta.
 | `WEBHOOK_SECRET` | (optional) Telegram webhook token; random token is generated if omitted |
 | `DEFAULT_MODEL` | (optional) Default: `gemini-3.5-flash-lite` |
 | `USER_MEMORY_IDLE_DAYS` | (optional) Inactive user-memory retention; default 180 days |
+| `REPLY_BUDGET` | (optional) Max undirected replies per chat per window; default 4 |
+| `REPLY_BUDGET_SECONDS` | (optional) Reply-budget window seconds; default 300 |
 
 **3. Deploy**:
 - Push this repo to GitHub

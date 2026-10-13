@@ -66,9 +66,11 @@ class IMDBTestCase(unittest.TestCase):
         db.invalidate_state_cache()
         self.p_owner = patch.object(config, "OWNER_CHAT_ID", OWNER)
         self.p_owner.start()
+        bot._REPLY_TIMES.clear()
         self.addCleanup(self.p_db.stop)
         self.addCleanup(self.p_owner.stop)
         self.addCleanup(db.invalidate_state_cache)
+        self.addCleanup(bot._REPLY_TIMES.clear)
 
     def _link_channel(self, username="testchan"):
         db.save_state("channel_id", CHAN)
