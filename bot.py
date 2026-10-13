@@ -1659,9 +1659,33 @@ def run_webhook() -> None:
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path not in ("/", "/healthz"):
+            path = (self.path or "").split("?", 1)[0]
+            if path not in ("/", "/healthz"):
                 self.send_response(404)
                 self.end_headers()
+                return
+            # v4.0 observability: /healthz?debug=1 returns JSON with the
+            # truth-layer state (last sweep result, probe cache size) so
+            # production behavior can be verified without log access.
+            if "debug=1" in (self.path or ""):
+                try:
+                    payload = {
+                        "ok": True,
+                        "version": "4.0-truth-agent",
+                        "storage": "mongo" if db.is_persistent() else "memory",
+                        "last_sweep": verify.last_sweep(),
+                        "probe_cache": verify.stats().get("cached_probes", 0),
+                        "keys": ai_engine.get_router().key_count(),
+                        "ts": int(time.time()),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    payload = {"ok": True, "debug_error": repr(exc)[:200]}
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             body = b"ok"
             self.send_response(200)

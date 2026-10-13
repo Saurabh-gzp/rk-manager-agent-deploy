@@ -36,7 +36,7 @@ _PROBE_CACHE: dict[tuple[int, int], tuple[float, bool | None]] = {}
 _CACHE_TTL = 600.0  # 10 min
 _PROBE_LOCK = threading.Lock()
 
-# Dead-post markers Telegram's public preview page uses
+# Dead-post markers Telegram's public preview page uses (legacy safety)
 _DEAD_MARKERS = (
     "post can't be shown",
     "post cannot be shown",
@@ -49,6 +49,15 @@ _DEAD_MARKERS = (
     "channel doesn't exist",
     "channel does not exist",
 )
+# v4.0 LIVE-VERIFIED page shapes (real channel @rkgamersbgmi par probe karke
+# confirm kiye gaye):
+#   LIVE post page  -> contains `data-telegram-post="<ch>/<id>"` (embed
+#                      widget) aur "Context Embed / View In Channel" header;
+#                      NO tgme_page_description.
+#   DEAD post page  -> t.me channel LANDING page fallback: has
+#                      tgme_page_description + tgme_page_action, NO embed.
+_LIVE_MARKER = b"data-telegram-post"   # bytes: works on raw read
+_LANDING_MARKER = b"tgme_page_description"
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -87,29 +96,42 @@ def _channel_username(channel_id: int | None) -> str:
 
 
 def _probe_http(username: str, message_id: int) -> bool | None:
-    """GET https://t.me/<username>/<N> and look for dead-post markers.
+    """GET https://t.me/<username>/<N> and classify the page shape.
 
+    LIVE-VERIFIED logic (against the real managed channel):
+      - live post  -> page embeds the post widget (`data-telegram-post`)
+      - dead post  -> t.me falls back to the channel LANDING page
+                      (`tgme_page_description` present, no embed)
+      - 404/410    -> dead
     Returns True (alive), False (deleted) or None (inconclusive — network
-    error, private channel, Cloudflare oddity — never treated as deleted).
+    error, captcha/interstitial, anything not shaped like t.me — never
+    treated as deleted: a flaky probe must never destroy good data).
     """
     url = f"https://t.me/{username}/{int(message_id)}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         with urllib.request.urlopen(req, timeout=8) as resp:
-            html = resp.read(65536).decode("utf-8", "replace")
+            raw = resp.read(65536)
     except urllib.error.HTTPError as e:
         if e.code in (404, 410):
             return False
         return None  # 403/5xx/anti-bot -> inconclusive
     except Exception:
         return None
-    low = html.lower()
+    if _LIVE_MARKER in raw:
+        return True
+    # not the embed shape — is it at least a t.me channel landing page?
+    if _LANDING_MARKER in raw:
+        # landing page WITHOUT the embed = post not renderable = deleted
+        return False
+    # anything else (captcha, redirect page, empty) — inconclusive
+    try:
+        low = raw.decode("utf-8", "replace").lower()
+    except Exception:
+        return None
     for marker in _DEAD_MARKERS:
         if marker in low:
             return False
-    # A live post preview always embeds the post text/description
-    if '<div class="tgme_message_text' in html or "tgme_widget_message_text" in low:
-        return True
     return None
 
 
@@ -233,22 +255,25 @@ def sweep_once(limit: int | None = None) -> dict:
     """Verify a bounded batch of recent channel posts; purge confirmed-dead.
 
     Only public channels are probeable. Skips posts verified recently.
+    Result db-state me save hota hai (`last_verify_sweep`) taaki /healthz
+    se production behavior observe ho sake.
     """
     if not _enabled():
         return {"skipped": True}
     try:
-        limit = int(limit or getattr(config, "VERIFY_SWEEP_BATCH", 60))
+        limit = int(limit) if limit is not None else int(
+            getattr(config, "VERIFY_SWEEP_BATCH", 60))
     except Exception:
         limit = 60
+    res = {"error": "db"}
     try:
         from db import get_db
         coll = get_db()["channel_posts"]
-        docs = []
-        cur = coll.find({})
-        rows = list(cur)
+        rows = list(coll.find({}))
         rows.sort(key=lambda d: (d.get("date") or 0), reverse=True)
-        docs = rows[: max(limit * 3, limit)]  # extra headroom for unknowns
+        docs = rows[: max(limit * 3, limit)]  # headroom for unknowns
     except Exception:
+        _remember_sweep({"error": "db"})
         return {"error": "db"}
     checked = purged = skipped = 0
     for d in docs:
@@ -277,7 +302,28 @@ def sweep_once(limit: int | None = None) -> dict:
                 purged += 1
             except Exception:
                 pass
-    return {"checked": checked, "purged": purged, "skipped": skipped}
+    res = {"checked": checked, "purged": purged, "skipped": skipped}
+    _remember_sweep(res)
+    return res
+
+
+def _remember_sweep(res: dict) -> None:
+    """Persist the last sweep result for /healthz observability."""
+    try:
+        from db import save_state
+        out = dict(res)
+        out["ts"] = int(time.time())
+        save_state("last_verify_sweep", out)
+    except Exception:
+        pass
+
+
+def last_sweep() -> dict | None:
+    try:
+        from db import get_state
+        return get_state("last_verify_sweep")
+    except Exception:
+        return None
 
 
 def start_background_sweep() -> threading.Thread | None:

@@ -430,6 +430,16 @@ class ExchangeHelpFixTests(IMDBTestCase):
 # 5. verify module edges
 # ---------------------------------------------------------------------------
 class VerifyEdgeTests(IMDBTestCase):
+    def _mock_urlopen(self, body: bytes):
+        """Patch urlopen so `with urlopen(...) as resp: resp.read(...)` returns
+        `body` (MagicMock ka default __enter__ child mock deta hai — read
+        lambda us pe pahunchta hi nahi tha; ab context binds to self)."""
+        resp = MagicMock()
+        resp.read = lambda n=0: body
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        return MagicMock(return_value=resp)
+
     def test_disabled_flag_disables(self):
         with patch.object(config, "VERIFY_ENABLED", 0):
             self.assertIsNone(verify.verify_post(CHAN, 1))
@@ -438,10 +448,28 @@ class VerifyEdgeTests(IMDBTestCase):
     def test_dead_markers_detected(self):
         for body in ("Post can't be shown", "message not found",
                      "This message doesn't exist"):
-            with patch.object(verify.urllib.request, "urlopen",
-                              MagicMock(return_value=MagicMock(
-                                  read=lambda n=0: body.encode()))):
+            m = self._mock_urlopen(body.encode())
+            with patch.object(verify.urllib.request, "urlopen", m):
                 self.assertFalse(verify._probe_http("somechan", 5))
+
+    def test_live_post_page_shape_detected(self):
+        # LIVE-VERIFIED shape (real channel @rkgamersbgmi): embed widget
+        body = (b'<html><body><script async src="telegram-widget.js" '
+                b'data-telegram-post="somechan/5" data-width="100%">'
+                b'</script>Context Embed View In Channel</body></html>')
+        with patch.object(verify.urllib.request, "urlopen",
+                          self._mock_urlopen(body)):
+            self.assertTrue(verify._probe_http("somechan", 5))
+
+    def test_landing_page_shape_means_dead(self):
+        # DEAD shape: t.me falls back to the channel LANDING page
+        body = (b'<html><body><div class="tgme_page_description">'
+                b'Channel about gaming</div>'
+                b'<div class="tgme_page_action">View Post</div>'
+                b'</body></html>')
+        with patch.object(verify.urllib.request, "urlopen",
+                          self._mock_urlopen(body)):
+            self.assertFalse(verify._probe_http("somechan", 5))
 
     def test_http_404_means_dead(self):
         import urllib.error
@@ -452,6 +480,14 @@ class VerifyEdgeTests(IMDBTestCase):
     def test_network_error_means_unknown(self):
         with patch.object(verify.urllib.request, "urlopen",
                           side_effect=OSError("boom")):
+            self.assertIsNone(verify._probe_http("somechan", 5))
+
+    def test_captcha_page_means_unknown(self):
+        # interstitial/captcha page: NEITHER marker -> inconclusive (a flaky
+        # probe must never purge a live post)
+        body = b"<html>Checking your browser...</html>"
+        with patch.object(verify.urllib.request, "urlopen",
+                          self._mock_urlopen(body)):
             self.assertIsNone(verify._probe_http("somechan", 5))
 
 
