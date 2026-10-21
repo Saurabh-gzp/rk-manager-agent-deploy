@@ -1675,11 +1675,15 @@ def run_webhook() -> None:
                 try:
                     payload = {
                         "ok": True,
-                        "version": "4.0-truth-agent",
+                        "version": "4.1-multi-provider",
                         "storage": "mongo" if db.is_persistent() else "memory",
                         "last_sweep": verify.last_sweep(),
                         "probe_cache": verify.stats().get("cached_probes", 0),
                         "keys": ai_engine.get_router().key_count(),
+                        "providers": [
+                            {"name": p.name, "kind": p.kind, "keys": len(p.pool.keys)}
+                            for p in ai_engine.get_router().providers
+                        ],
                         "ts": int(time.time()),
                     }
                 except Exception as exc:  # noqa: BLE001
