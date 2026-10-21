@@ -1163,6 +1163,14 @@ def handle_channel_post(post) -> None:
     if not links.is_managed_channel(chat_id):
         return
     knowledge.ingest_channel_post(post)
+    # v5.1.1: latest-id tracker feed — recent_channel_posts/FC channel
+    # tools is hi se turant fresh top use karte hain
+    try:
+        mid = post.get("message_id")
+        if mid:
+            mtproto_layer.note_message_id(int(chat_id), int(mid))
+    except Exception:
+        pass
 
 
 def handle_callback_query(cb) -> None:
@@ -1697,6 +1705,13 @@ def _apply_mtproto_event(kind: str, chat_id, payload) -> None:
         elif kind == "new":
             if chat_id and links.is_managed_channel(chat_id) and payload:
                 knowledge.ingest_mtproto_post(chat_id, payload)
+                try:
+                    # v5.1.1: naya channel post = naya LIVE top
+                    if payload.get("id"):
+                        mtproto_layer.note_message_id(
+                            int(chat_id), int(payload["id"]))
+                except Exception:
+                    pass
     except Exception:
         log("mtproto event apply failed:", traceback.format_exc())
 
@@ -1959,9 +1974,19 @@ def _radar_channel_pass() -> None:
         if posts:
             _CH_RADAR_LAST[cid] = max(_CH_RADAR_LAST.get(cid) or 0,
                                        int(posts[-1]["id"]))
-        elif last:
-            # window khaali — aage badho (empty windows dobara nahi scan)
-            _CH_RADAR_LAST[cid] = last + int(config.RADAR_BATCH) - 1
+        else:
+            # v5.1.1 SAFE WALK-THROUGH: empty window par pointer tabhi
+            # aage badhta hai jab is window ke BAAD koi zinda id CONFIRMED
+            # ho (known > win_end). Wajah: naye ids SEQUENTIAL hote hain —
+            # id `known` zinda hai to win_end tak ke saare ids assign ho
+            # chuke hain, wahan future me koi naya post nahi aayega.
+            # known nahi (ya window me hi hai) -> PARK: agla post isi
+            # window me land hoga. (Purana blind-advance top 354 se 1134
+            # tak bhaag gaya tha — naya post #355 miss ho sakta tha.)
+            win_end = last + int(config.RADAR_BATCH) - 1
+            known = mtproto_layer.latest_group_message_id(cid) or 0
+            if known and known > win_end:
+                _CH_RADAR_LAST[cid] = win_end
     except Exception:
         log("channel radar pass failed (non-fatal):",
             traceback.format_exc())
@@ -2042,10 +2067,22 @@ def _radar_loop() -> None:
                             start = last + 1
                             for p in msgs:
                                 _radar_ingest(gid, p)
-                        else:
-                            # window khaali — aage badh jao (phir kabhi nahi rescan)
-                            last = max(last, start + int(config.RADAR_BATCH) - 1)
-                            break
+                            continue
+                        # v5.1.1 SAFE WALK-THROUGH: empty window par aage
+                        # tabhi badho jab is window ke BAAD koi id zinda
+                        # CONFIRMED ho (known > win_end) — ids sequential
+                        # hain, known tak sab assign ho chuka hai. warna
+                        # PARK (agla member message isi window me aayega —
+                        # privacy-proof). Blind-advance pointer ko real
+                        # top se aage bhaag deta tha aur naye messages
+                        # hamesha ke liye miss ho jate the.
+                        win_end = start + int(config.RADAR_BATCH) - 1
+                        known = mtproto_layer.latest_group_message_id(gid) or 0
+                        if known and known > win_end:
+                            last = max(last, win_end)
+                            start = win_end + 1
+                            continue
+                        break
                     _RADAR_LAST[gid] = last
             # v5.1: managed channel ka fast pass (group na ho to bhi chale)
             _radar_channel_pass()

@@ -398,17 +398,40 @@ class TestChannelFreshness(BaseCase):
                     ing.assert_called_once()
                     self.assertEqual(bot._CH_RADAR_LAST[CHAN], 500)
 
-    def test_radar_channel_pass_empty_window_advances(self):
+    def test_radar_channel_pass_empty_window_parks(self):
+        # v5.1.1: blind advance dead — empty window par pointer PARK
+        # rehta hai (naya post #last+1 isi window me hi land hoga).
         bot._CH_RADAR_LAST.clear()
         with patch.object(bot.links, "get_channel_id", return_value=CHAN):
             with patch.object(bot.mtproto_layer, "scan_channel_window") as sc:
                 sc.return_value = []
                 with patch.object(bot.knowledge, "ingest_mtproto_post") as ing:
-                    bot._CH_RADAR_LAST[CHAN] = 1000
-                    bot._radar_channel_pass()
-                    ing.assert_not_called()
-                    self.assertEqual(bot._CH_RADAR_LAST[CHAN],
-                                     1000 + config.RADAR_BATCH - 1)
+                    with patch.object(bot.mtproto_layer,
+                                     "latest_group_message_id",
+                                     return_value=1000):
+                        bot._CH_RADAR_LAST[CHAN] = 1000
+                        bot._radar_channel_pass()
+                        ing.assert_not_called()
+                        # park: known (1000) <= win_end (1039) -> no advance
+                        self.assertEqual(bot._CH_RADAR_LAST[CHAN], 1000)
+        bot._CH_RADAR_LAST.clear()
+
+    def test_radar_channel_pass_walk_through_when_known_beyond(self):
+        # v5.1.1 SAFE WALK-THROUGH: empty window ke baad zinda id
+        # CONFIRMED ho (known > win_end) to hi aage badhta hai.
+        bot._CH_RADAR_LAST.clear()
+        with patch.object(bot.links, "get_channel_id", return_value=CHAN):
+            with patch.object(bot.mtproto_layer, "scan_channel_window") as sc:
+                sc.return_value = []
+                with patch.object(bot.knowledge, "ingest_mtproto_post") as ing:
+                    with patch.object(bot.mtproto_layer,
+                                     "latest_group_message_id",
+                                     return_value=2000):
+                        bot._CH_RADAR_LAST[CHAN] = 1000
+                        bot._radar_channel_pass()
+                        ing.assert_not_called()
+                        win_end = 1000 + config.RADAR_BATCH - 1
+                        self.assertEqual(bot._CH_RADAR_LAST[CHAN], win_end)
         bot._CH_RADAR_LAST.clear()
 
     def test_radar_channel_pass_disabled(self):
