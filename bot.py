@@ -48,6 +48,7 @@ import channel_forward  # noqa: E402
 import community  # noqa: E402
 import fmt  # noqa: E402
 import verify  # noqa: E402  # v4.0 TRUTH LAYER
+import mtproto_layer  # noqa: E402  # v4.2 REALTIME POWER LAYER
 
 
 def log(*args):
@@ -865,7 +866,8 @@ def _should_reply_llm(text: str, name: str, chat_id: int,
 
 
 def _start_answer_prefetch(question: str, uid: int | None,
-                           chat_id: int | None = None):
+                           chat_id: int | None = None,
+                           message_id: int | None = None):
     """SPEED: run the answer's DB work (knowledge search + rules + facts)
     in a daemon thread WHILE the reply-gate LLM call is in flight. The box
     is handed to agent.answer(ctx['prefetch']) — the search latency hides
@@ -876,6 +878,13 @@ def _start_answer_prefetch(question: str, uid: int | None,
     hain) grounding me aa jaati hain. Isse 'key kha milega' jaise sawal
     ka jawab channel + group ke ACTUAL data se aata hai ('channel ke
     hisab se'), sirf asker ki apni history se nahi.
+
+    v4.2 REALTIME: group answers ke liye LIVE CONTEXT bhi isi thread me
+    fetch hota hai — MTProto se current message se pehle ke messages
+    (privacy mode ON ho tab bhi, kyunki ID-fetch ko privacy touch
+    nahi karta). Bot API ka recent_log sirf wahi dikhata tha jo bot
+    receive karta hai; live_context asli conversation dikhata hai —
+    'dumb group answers' ka structural fix. Box key: live_context.
     """
     import threading
     box: dict = {}
@@ -895,6 +904,24 @@ def _start_answer_prefetch(question: str, uid: int | None,
             box["facts"] = community.community_block()
         except Exception:
             box["facts"] = None
+        # v4.2: LIVE group context (MTProto ID-fetch — privacy-proof)
+        try:
+            if (chat_id and message_id and chat_id < 0
+                    and mtproto_layer.is_connected()):
+                msgs = mtproto_layer.fetch_group_context(
+                    chat_id, int(message_id),
+                    before=max(1, int(getattr(config, "MTPROTO_GROUP_CONTEXT", 15))))
+                if msgs:
+                    lines = []
+                    for m in msgs:
+                        who = (m.get("author") or "").strip()
+                        txt = (m.get("text") or "").strip()
+                        if not txt:
+                            continue
+                        lines.append(f"#{m['id']} {who + ': ' if who else ''}{txt[:120]}")
+                    box["live_context"] = "\n".join(lines[-20:])
+        except Exception:
+            box["live_context"] = None
 
     t = threading.Thread(target=_work, daemon=True)
     t.start()
@@ -1349,8 +1376,9 @@ def handle_message(msg) -> None:
                 # ka nahi. Help-hi-help: bot jawab dega (budget ke saath).
                 if not (help_q or triggers.is_explicit_request(text)):
                     return
-                prefetch_box = _start_answer_prefetch(text, uid,
-                                                      chat_id=chat_id)
+                prefetch_box = _start_answer_prefetch(
+                    text, uid, chat_id=chat_id,
+                    message_id=msg.get("message_id"))
             elif triggers.is_explicit_request(text) or help_q:
                 # v3.4: sirf EXPLICIT requests (bhejo/dedo/app do/help/scan
                 # karo) direct route hote the. v3.5: help-seeking questions
@@ -1359,8 +1387,9 @@ def handle_message(msg) -> None:
                 # raha kyunki gate conservative tha / fail ho gaya tha.
                 # Ab ye tier seedha answer hota hai: GROUNDING aur RAHEGI
                 # (answer sirf channel/group ke data se), budget bhi lagega.
-                prefetch_box = _start_answer_prefetch(text, uid,
-                                                      chat_id=chat_id)
+                prefetch_box = _start_answer_prefetch(
+                    text, uid, chat_id=chat_id,
+                    message_id=msg.get("message_id"))
             else:
                 # Plain chatter ("hyy", "ok"): never needs a reply.
                 if triggers.is_plain_chatter(text):
@@ -1368,8 +1397,9 @@ def handle_message(msg) -> None:
                 # SPEED: answer-context (search/rules/facts) builds in a
                 # daemon thread WHILE the gate LLM call runs — if the gate
                 # says YES the answer starts instantly, zero added latency.
-                prefetch_box = _start_answer_prefetch(text, uid,
-                                                      chat_id=chat_id)
+                prefetch_box = _start_answer_prefetch(
+                    text, uid, chat_id=chat_id,
+                    message_id=msg.get("message_id"))
                 # Everything else: the bot decides itself with the LLM gate
                 # (it sees recent conversation context).
                 who = user.get("first_name") or user.get("username") or "member"
@@ -1428,7 +1458,9 @@ def handle_message(msg) -> None:
         else:
             question = text
         if prefetch_box is None:
-            prefetch_box = _start_answer_prefetch(text, uid, chat_id=chat_id)
+            prefetch_box = _start_answer_prefetch(
+                text, uid, chat_id=chat_id,
+                message_id=msg.get("message_id"))
         # Media-only message: give the gate something to judge from context
         # (e.g. the bot just asked for a screenshot).
         kinds = _media_kinds(msg)
@@ -1555,6 +1587,102 @@ def _deliver_answer(chat_id: int, res: dict, reply_to: int | None = None) -> Non
             log("file_offer delivery error:", traceback.format_exc())
 
 
+# ---------------- v4.2 MTProto realtime sync ----------------
+
+
+def _apply_mtproto_event(kind: str, chat_id, payload) -> None:
+    """Ek realtime MTProto event ko knowledge-store par apply karo.
+
+    delete -> channel posts + stored group messages purge + probe-cache
+              dead-mark (stale-data leak ka REAL-TIME fix — pehle TTL
+              guesses ya HTTP probes chahiye the)
+    edit   -> managed channel ke post ka naya text sync
+    new    -> Bot API stream miss hua post (backup ingestion)
+    """
+    try:
+        if kind == "delete":
+            ids = [int(x) for x in (payload or [])][:200]
+            if not ids or not chat_id:
+                return
+            posts_gone = knowledge.purge_posts(chat_id, ids)
+            msgs_gone = knowledge.purge_group_messages(chat_id, ids)
+            try:
+                verify.mark_deleted(chat_id, ids)
+            except Exception:
+                pass
+            if posts_gone or msgs_gone:
+                log(f"mtproto realtime DELETE chat={chat_id} ids={ids} "
+                    f"purged posts={posts_gone} msgs={msgs_gone}")
+        elif kind == "edit":
+            if chat_id and links.is_managed_channel(chat_id) and payload:
+                knowledge.ingest_mtproto_post(chat_id, payload)
+        elif kind == "new":
+            if chat_id and links.is_managed_channel(chat_id) and payload:
+                knowledge.ingest_mtproto_post(chat_id, payload)
+    except Exception:
+        log("mtproto event apply failed:", traceback.format_exc())
+
+
+def _mtproto_sync_loop() -> None:
+    """Daemon thread: MTProto events drain + periodic backfill/reconcile.
+
+    - har 2s: delete/edit/new events apply (realtime)
+    - har MTPROTO_BACKFILL_MINUTES: managed channels ka ID-range backfill
+      (bot ke miss hue posts) + live reconcile (stored posts verify,
+      deleted => purge). Telegram-side limits ke liye bounded hai.
+    """
+    import threading
+    # pehla backfill ~45s baad — cold start par Mongo/TG settle ho jaye
+    next_cycle = time.time() + 45
+    while True:
+        try:
+            for kind, chat_id, payload in mtproto_layer.drain_events(200):
+                _apply_mtproto_event(kind, chat_id, payload)
+        except Exception:
+            log("mtproto drain failed:", traceback.format_exc())
+        now = time.time()
+        if now >= next_cycle and mtproto_layer.is_connected():
+            next_cycle = now + config.MTPROTO_BACKFILL_MINUTES * 60
+            try:
+                total_added = total_purged = 0
+                for cid in knowledge.managed_channel_ids():
+                    r = knowledge.mtproto_backfill(cid)
+                    total_added += int(r.get("added") or 0)
+                    r2 = knowledge.mtproto_reconcile(cid)
+                    total_purged += int(r2.get("purged") or 0)
+                db.save_state("last_mt_sync", {
+                    "ts": int(now), "added": total_added,
+                    "purged": total_purged,
+                    "connected": mtproto_layer.is_connected(),
+                })
+                if total_added or total_purged:
+                    log(f"mtproto sync: +{total_added} new, "
+                        f"-{total_purged} deleted (live-verified)")
+            except Exception:
+                log("mtproto sync cycle failed:", traceback.format_exc())
+        time.sleep(2)
+
+
+def _start_mtproto() -> None:
+    """Layer + sync thread start. Non-fatal — bot bina MTProto bhi full
+    functional rehta hai (sirf realtime powers nahi)."""
+    import threading
+    try:
+        started = mtproto_layer.start()
+        if started:
+            log("MTProto realtime layer starting (owner API ID/Hash, "
+                "same bot token — delete/edit events + ID-fetch)")
+            threading.Thread(target=_mtproto_sync_loop, daemon=True,
+                             name="rk-mtproto-sync").start()
+            log("MTProto sync thread started (2s event drain + "
+                f"{config.MTPROTO_BACKFILL_MINUTES}min backfill/reconcile)")
+        else:
+            log("MTProto layer disabled (", mtproto_layer.status()
+                .get("disabled_reason") or "config", ") — bot normal mode me")
+    except Exception:
+        log("MTProto start failed (non-fatal):", traceback.format_exc())
+
+
 # ---------------- run modes ----------------
 
 
@@ -1675,10 +1803,12 @@ def run_webhook() -> None:
                 try:
                     payload = {
                         "ok": True,
-                        "version": "4.1-multi-provider",
+                        "version": "4.2-realtime-agent",
                         "storage": "mongo" if db.is_persistent() else "memory",
                         "last_sweep": verify.last_sweep(),
                         "probe_cache": verify.stats().get("cached_probes", 0),
+                        "mtproto": mtproto_layer.status(),
+                        "last_mt_sync": db.get_state("last_mt_sync"),
                         "keys": ai_engine.get_router().key_count(),
                         "providers": [
                             {"name": p.name, "kind": p.kind, "keys": len(p.pool.keys)}
@@ -1739,15 +1869,19 @@ def run_webhook() -> None:
 
 
 def main() -> None:
-    log("starting RK Manager Agent v4.0 (TRUTH AGENT)…")
+    log("starting RK Manager Agent v4.2 (REALTIME AGENT)…")
     log(f"owner={config.OWNER_CHAT_ID} admin={config.ADMIN_CHAT_ID or config.OWNER_CHAT_ID}")
-    log(f"gemini_keys={len(config.GEMINI_KEYS)} deepseek={'yes' if config.DEEPSEEK_KEY else 'no'}")
+    log(f"gemini_keys={len(config.GEMINI_KEYS)} deepseek={'yes' if config.DEEPSEEK_KEY else 'no'} "
+        f"mercury_keys={len(config.MERCURY_KEYS)}")
     log(
         "storage=MongoDB (persistent)" if db.is_persistent()
         else "storage=in-memory (volatile; restart loses stored data)"
     )
+    # v4.2 REALTIME POWER LAYER: MTProto (owner API ID/Hash) — realtime
+    # delete/edit events, channel+group ID-fetch, history backfill.
+    _start_mtproto()
     # v4.0 TRUTH LAYER: background channel-post verifier (public channels
-    # ka t.me probe + dead-post purge) — old/deleted data ka naya jawab.
+    # ka t.me probe + dead-post purge) — MTProto down hone par fallback.
     try:
         verify.start_background_sweep()
         log("verify sweep thread started (30 min cycle, bounded batches)")

@@ -139,9 +139,15 @@ def verify_post(channel_id: int | None, message_id: int | None,
                 force: bool = False) -> bool | None:
     """Is this channel post still alive? (True/False/None-unknown).
 
-    Cached for 10 minutes. Only public channels can be probed; private
-    ones (no @username) return None (unknown) — delivery-time probe
-    remains the authority there. Never *deletes* anything by itself.
+    v4.2 — do-layer verification, AUTHORITATIVE pehle:
+      1. MTProto (channels.getMessages): direct Telegram se live
+         verdict — private channels bhi (HTTP probe nahi kar sakta tha
+         unhe), ~0.1-0.3s, delete = MessageEmpty (alive=False).
+      2. Fallback — public channel ka t.me page probe (purana v4.0
+         layer; MTProto down/unreachable hone par hi chalta hai).
+
+    Cached for 10 minutes. Never *deletes* anything by itself — caller
+    (purge_if_dead / sweep / answer-gate) decides.
     """
     if not channel_id or not message_id or not _enabled():
         return None
@@ -151,6 +157,20 @@ def verify_post(channel_id: int | None, message_id: int | None,
         hit = _PROBE_CACHE.get(key)
         if hit and not force and now - hit[0] < _CACHE_TTL:
             return hit[1]
+    # ---- layer 1: MTProto live fetch (authoritative) ----
+    try:
+        import mtproto_layer
+        if mtproto_layer.is_connected():
+            verdicts = mtproto_layer.verify_posts(int(channel_id),
+                                                  [int(message_id)])
+            alive = verdicts.get(int(message_id))
+            if alive is not None:
+                with _PROBE_LOCK:
+                    _PROBE_CACHE[key] = (time.time(), alive)
+                return alive
+    except Exception:
+        pass
+    # ---- layer 2: HTTP t.me probe (public channels only) ----
     uname = _channel_username(channel_id)
     if not uname:
         return None  # private channel — HTTP probe impossible
@@ -254,9 +274,11 @@ def verify_answer_links(text: str | None, question: str = "") -> str | None:
 def sweep_once(limit: int | None = None) -> dict:
     """Verify a bounded batch of recent channel posts; purge confirmed-dead.
 
-    Only public channels are probeable. Skips posts verified recently.
-    Result db-state me save hota hai (`last_verify_sweep`) taaki /healthz
-    se production behavior observe ho sake.
+    v4.2: MTProto connected hai to BATCH verify (100 IDs per request,
+    private channels bhi, fast) — HTTP probing sirf fallback hai.
+    Skips posts verified recently. Result db-state me save hota hai
+    (`last_verify_sweep`) taaki /healthz se production behavior observe
+    ho sake.
     """
     if not _enabled():
         return {"skipped": True}
@@ -265,7 +287,6 @@ def sweep_once(limit: int | None = None) -> dict:
             getattr(config, "VERIFY_SWEEP_BATCH", 60))
     except Exception:
         limit = 60
-    res = {"error": "db"}
     try:
         from db import get_db
         coll = get_db()["channel_posts"]
@@ -275,6 +296,58 @@ def sweep_once(limit: int | None = None) -> dict:
     except Exception:
         _remember_sweep({"error": "db"})
         return {"error": "db"}
+
+    # ---- v4.2 fast path: MTProto batch verify (one request per 100 ids) ----
+    try:
+        import mtproto_layer
+        if mtproto_layer.is_connected():
+            checked = purged = 0
+            pending: list[tuple[int, int]] = []  # (cid, mid) candidates
+            for d in docs:
+                cid, mid = d.get("channel_id"), d.get("message_id")
+                if not cid or not mid:
+                    continue
+                with _PROBE_LOCK:
+                    hit = _PROBE_CACHE.get((int(cid), int(mid)))
+                    if hit and hit[1] is False:
+                        continue
+                    if hit and time.time() - hit[0] < _CACHE_TTL:
+                        continue
+                pending.append((int(cid), int(mid)))
+                if len(pending) >= limit:
+                    break
+            if not pending:
+                res = {"checked": 0, "purged": 0, "skipped": 0,
+                       "mode": "mtproto"}
+                _remember_sweep(res)
+                return res
+            by_chan: dict[int, list[int]] = {}
+            for cid, mid in pending:
+                by_chan.setdefault(cid, []).append(mid)
+            for cid, mids in by_chan.items():
+                verdicts = mtproto_layer.verify_posts(cid, mids)
+                for mid in mids:
+                    alive = verdicts.get(mid)
+                    if alive is None:
+                        continue
+                    checked += 1
+                    with _PROBE_LOCK:
+                        _PROBE_CACHE[(cid, mid)] = (time.time(), alive)
+                    if alive is False:
+                        try:
+                            from knowledge import purge_post
+                            purge_post(cid, mid)
+                            purged += 1
+                        except Exception:
+                            pass
+            res = {"checked": checked, "purged": purged,
+                   "skipped": len(pending) - checked, "mode": "mtproto"}
+            _remember_sweep(res)
+            return res
+    except Exception:
+        pass
+
+    # ---- legacy path: HTTP page probe (MTProto down) ----
     checked = purged = skipped = 0
     for d in docs:
         if checked >= limit:
@@ -302,7 +375,8 @@ def sweep_once(limit: int | None = None) -> dict:
                 purged += 1
             except Exception:
                 pass
-    res = {"checked": checked, "purged": purged, "skipped": skipped}
+    res = {"checked": checked, "purged": purged, "skipped": skipped,
+           "mode": "http"}
     _remember_sweep(res)
     return res
 
@@ -356,6 +430,21 @@ def start_background_sweep() -> threading.Thread | None:
     t = threading.Thread(target=_loop, daemon=True, name="rk-verify-sweep")
     t.start()
     return t
+
+
+def mark_deleted(channel_id: int | None, message_ids: list[int]) -> None:
+    """v4.2: MTProto delete-event ne confirm kar diya — in IDs ko
+    dead-mark karo (sweep/probe ab in par dobara network roundtrip
+    nahi lagayegi). Fail-safe: sirf cache likhta hai, kuch delete nahi."""
+    if not channel_id or not message_ids:
+        return
+    try:
+        now = time.time()
+        with _PROBE_LOCK:
+            for mid in message_ids:
+                _PROBE_CACHE[(int(channel_id), int(mid))] = (now, False)
+    except Exception:
+        pass
 
 
 def stats() -> dict:

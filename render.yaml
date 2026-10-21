@@ -28,6 +28,10 @@ services:
         sync: false
       - key: ADMIN_CHAT_ID
         sync: false
+      - key: MTPROTO_API_ID
+        sync: false
+      - key: MTPROTO_API_HASH
+        sync: false
       - key: DEFAULT_MODEL
         value: gemini-3.5-flash-lite
       - key: USER_MEMORY_IDLE_DAYS

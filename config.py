@@ -114,3 +114,22 @@ DIGEST_ENABLED = _int("DIGEST_ENABLED", 1)
 VERIFY_ENABLED = _int("VERIFY_ENABLED", 1)
 VERIFY_SWEEP_MINUTES = max(5, _int("VERIFY_SWEEP_MINUTES", 30))
 VERIFY_SWEEP_BATCH = _int("VERIFY_SWEEP_BATCH", 60)
+# --- v4.2 REALTIME POWER LAYER (MTProto / Telethon) ---
+# Owner ke Telegram API ID/Hash — SAME bot token ke saath MTProto se:
+# delete/edit events realtime, channel+group messages ID se live-fetch,
+# history backfill (ID-range scan), group-answer context expansion.
+# API ID na ho to layer khud disable — bot purani tarah full chalta hai.
+MTPROTO_ENABLED = _int("MTPROTO_ENABLED", 1)
+MTPROTO_API_ID = _int("MTPROTO_API_ID", 0)
+MTPROTO_API_HASH = os.environ.get("MTPROTO_API_HASH", "").strip()
+# Session string override (optional) — warna Mongo state me persist hoti hai.
+MTPROTO_SESSION = os.environ.get("MTPROTO_SESSION", "").strip()
+# History backfill: stored max post-id ke baad itne naye IDs scan hote
+# hain (har backfill cycle + bot-restart par). 200 = ~har post cover.
+MTPROTO_SCAN_WINDOW = _int("MTPROTO_SCAN_WINDOW", 200)
+# Group answers ka LIVE context: current message se pehle itne messages
+# MTProto se fetch hote hain (privacy mode ON ho tab bhi).
+MTPROTO_GROUP_CONTEXT = _int("MTPROTO_GROUP_CONTEXT", 15)
+# Backfill + live-reconcile cycle (minutes). Har cycle: missed posts ingest
+# + stored posts batch-verify (deleted => purge).
+MTPROTO_BACKFILL_MINUTES = max(3, _int("MTPROTO_BACKFILL_MINUTES", 15))

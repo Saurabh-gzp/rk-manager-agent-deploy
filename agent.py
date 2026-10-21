@@ -43,7 +43,13 @@ _CAPABILITIES = (
     "ability. "
     "You can also SEE photos, LISTEN to voice messages, and WATCH short "
     "videos users send — they arrive attached to the message, use them. "
-    "You can deliver files from the linked channel on request."
+    "You can deliver files from the linked channel on request. "
+    "v4.2 REALTIME POWERS (MTProto): tumhe LIVE TELEGRAM ACCESS hai — "
+    "har message ke around ka real channel/group history dikhta hai "
+    "(LIVE GROUP CHAT block), deleted posts ya messages tumhari "
+    "memory se turant gayab ho jate hain, aur har channel link jo tum "
+    "mention karo live verify hota hai. Purane/context blocks vs LIVE "
+    "block me conflict ho to LIVE block ko authoritative maano. "
 )
 
 
@@ -403,8 +409,15 @@ def _best_file_offer(hits: list[dict], question: str) -> dict | None:
     q = question or ""
     if not hits:
         return None
+    # v4.2: file_id Bot API se aata hai; MTProto-backfilled posts ka
+    # file_id None hota hai par file_type + message_id hote hain —
+    # delivery forward-by-id se hoti hai, isliye dono offer-eligible.
+    _DELIVERABLE_TYPES = ("document", "video", "audio", "voice",
+                          "animation", "photo", "video_note",
+                          "sticker", "contact")
     file_hits = [h for h in hits if h.get("kind") == "post"
-                 and (h.get("file_id") or h.get("file_type") == "contact")]
+                 and (h.get("file_id")
+                      or h.get("file_type") in _DELIVERABLE_TYPES)]
     if not file_hits:
         return None
     # strip links, then take specific (non-vague) tokens
@@ -1047,6 +1060,19 @@ def answer(question: str, user_ctx: dict) -> dict:
     if facts_block is None:
         facts_block = community.community_block()
     log_block = _recent_log_block(user_ctx)
+    # v4.2 REALTIME: group ka LIVE conversation (MTProto ID-fetch —
+    # privacy mode se bypass, seedha Telegram se). Bot API ka recent_log
+    # sirf privileged messages tha; ye asli conversation flow hai —
+    # group answers ab real context ke saath bante hain.
+    live_ctx = (user_ctx.get("prefetch") or {}).get("live_context")
+    live_block = ""
+    if live_ctx:
+        live_block = (
+            "LIVE GROUP CHAT (MTProto realtime fetch — messages jo abhi "
+            "abhi hue, direct Telegram se; #id = message id, deleted "
+            "messages isme kabhi nahi hote):\n"
+            + str(live_ctx)[:2500] + "\n\n"
+        )
     # Honest fact: the user seems to want a file, but nothing matching
     # exists in our storage. Injected so the model can NEVER pretend to
     # send one (the 'file bhej raha hu' hallucination is killed here).
@@ -1081,6 +1107,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             (standing + "\n\n" if standing else "")
             + (f"{facts_block}\n\n" if facts_block else "")
             + (f"{log_block}\n\n" if log_block else "")
+            + live_block
             + f"Context (learned from channel + group):\n{ctx_block}\n\n"
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
             + file_fact
@@ -1162,6 +1189,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             (standing + "\n\n" if standing else "")
             + (f"{facts_block}\n\n" if facts_block else "")
             + (f"{log_block}\n\n" if log_block else "")
+            + live_block
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
             + file_fact
             + member_fact

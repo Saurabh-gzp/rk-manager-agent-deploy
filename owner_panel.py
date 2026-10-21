@@ -200,9 +200,32 @@ def handle_owner_command(msg) -> bool:
     if command == "/status":
         from db import is_persistent
         store = "MongoDB" if is_persistent() else "temporary in-memory (restart par data lost ho sakta hai)"
+        # v4.2: MTProto realtime layer status (owner ka naya power hub)
+        try:
+            import mtproto_layer
+            mt = mtproto_layer.status()
+            if not mt.get("enabled"):
+                mt_line = "Realtime (MTProto): OFF — API ID/Hash set nahi"
+            elif mt.get("connected"):
+                mt_line = ("Realtime (MTProto): 🟢 LIVE — deletes/edits "
+                           f"turant sync, {mt.get('events_seen', 0)} events")
+            else:
+                mt_line = ("Realtime (MTProto): 🟡 connecting..."
+                           + (f" ({mt.get('last_error', '')[:60]})" if mt.get("last_error") else ""))
+        except Exception:
+            mt_line = "Realtime (MTProto): n/a"
+        try:
+            from db import get_state
+            last_sync = get_state("last_mt_sync") or {}
+            if last_sync:
+                mt_line += (f"\nLast live-sync: +{last_sync.get('added', 0)} new, "
+                            f"-{last_sync.get('purged', 0)} deleted verify")
+        except Exception:
+            pass
         _send(
             chat_id,
             f"Runtime status\nStorage: {store}\n"
+            f"{mt_line}\n"
             f"Group ID: {links.get_group_id() or 'not set'}\n"
             f"Channel ID: {links.get_channel_id() or 'not set'}\n"
             f"Moderation: {'ON' if moderation.is_enabled() else 'OFF'} "
