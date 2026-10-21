@@ -105,6 +105,9 @@ def ingest_message(msg: dict) -> None:
             "username": frm.get("username"),
             "first_name": frm.get("first_name"),
             "text": text,
+            # v4.2: message_id — MTProto delete-events stored group
+            # messages ko ID se purge kar paate hain.
+            "message_id": msg.get("message_id"),
             "date": msg.get("date"),
             "importance": _importance(
                 text, None,
@@ -353,8 +356,13 @@ def search(query: str, limit: int = 10, user_id: int | None = None,
 def find_file_for(query: str) -> dict | None:
     """Find the most recent channel post that has a file and matches the query."""
     hits = search(query, limit=20)
+    # v4.2: MTProto-backfilled posts (file_id=None par file_type hai) bhi
+    # deliverable hain — forward-by-id se delivery hoti hai.
+    deliverable = ("document", "video", "audio", "voice", "animation",
+                   "photo", "video_note", "sticker", "contact")
     for h in hits:
-        if h["kind"] == "post" and (h.get("file_id") or h.get("file_type") == "contact"):
+        if h["kind"] == "post" and (h.get("file_id")
+                                    or h.get("file_type") in deliverable):
             return h
     return None
 
@@ -699,6 +707,198 @@ def maybe_reconcile() -> str:
         return f"reconciled channels={len(chans)} removed={total}"
     except Exception as exc:  # noqa: BLE001
         return f"error: {exc!r}"
+
+
+# --- v4.2 MTProto helpers: live backfill + purge by real events ---
+
+def max_post_id(channel_id: int) -> int:
+    """Channel ka highest stored post id (0 = kuch nahi)."""
+    try:
+        docs = get_db()["channel_posts"].find({"channel_id": int(channel_id)})
+        best = 0
+        for d in docs:
+            mid = d.get("message_id")
+            if isinstance(mid, int) and mid > best:
+                best = mid
+        return best
+    except Exception:
+        return 0
+
+
+def ingest_mtproto_post(channel_id: int, p: dict) -> bool:
+    """v4.2: MTProto-scanned post ko channel_posts me daalo/upsert karo.
+
+    Backfill aur Bot API dono streams ek hi collection me converge
+    hote hain — key (channel_id, message_id) hai. file_id MTProto se
+    nahi milta (Bot API ka concept hai), par delivery forward-by-id se
+    hoti hai, isliye file_name/file_type kaafi hain. Never raises."""
+    try:
+        text = str(p.get("text") or "").strip()
+        file_type = p.get("file_type") or None
+        file_name = p.get("file_name") or None
+        if not text and not file_type:
+            return False
+        links = _URL_RE.findall(text)
+        doc = {
+            "channel_id": int(channel_id),
+            "message_id": int(p.get("id") or 0),
+            "text": text,
+            "caption": text if file_type else None,
+            "file_id": None,
+            "file_type": file_type,
+            "file_name": file_name,
+            "links": links,
+            "entities": [],
+            "media_group_id": p.get("grouped_id"),
+            "contact": None,
+            "date": int(p.get("date") or 0),
+            "forwarded": False,
+            "importance": _importance(text, "yes" if file_type else None,
+                                       False, "?" in text),
+            "ingested_at": time.time(),
+            "src": "mtproto",
+        }
+        if not doc["message_id"]:
+            return False
+        posts = get_db()["channel_posts"]
+        existing = posts.find_one({
+            "channel_id": doc["channel_id"],
+            "message_id": doc["message_id"],
+        })
+        if existing:
+            # Bot API ka doc RICHER hai (file_id/entities/links) — use
+            # kabhi downgrade nahi karte. Sirf: edited text sync, aur
+            # missing fields (file_name/date) bharo. Never raises.
+            patch: dict = {}
+            if str(existing.get("text") or "") != doc["text"]:
+                patch["text"] = doc["text"]
+                patch["links"] = doc["links"]
+                patch["caption"] = doc["caption"]
+            if file_name and not existing.get("file_name"):
+                patch["file_name"] = file_name
+            if file_type and not existing.get("file_type"):
+                patch["file_type"] = file_type
+            if not existing.get("date"):
+                patch["date"] = doc["date"]
+            if not existing.get("importance"):
+                patch["importance"] = doc["importance"]
+            if not existing.get("media_group_id") and doc.get("media_group_id"):
+                patch["media_group_id"] = doc["media_group_id"]
+            if patch:
+                posts.update_one({"_id": existing["_id"]}, {"$set": patch})
+        else:
+            posts.insert_one(doc)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[knowledge] ingest_mtproto_post failed: {exc!r}",
+              file=__import__("sys").stderr)
+        return False
+
+
+def purge_group_messages(chat_id: int, message_ids: list[int]) -> int:
+    """v4.2: MTProto delete-event aaye group messages memory se hatao.
+
+    Group/supergroup me kisi ne message udaya -> wo user ki memory me
+    bhi delete ho jana chahiye (wo 'old data' leak ka dusra rasta tha).
+    Returns removed count."""
+    if not chat_id or not message_ids:
+        return 0
+    try:
+        r = get_db()["messages"].delete_many({
+            "chat_id": int(chat_id),
+            "message_id": {"$in": [int(x) for x in message_ids]},
+        })
+        return int(getattr(r, "deleted_count", 0) or 0)
+    except Exception:
+        return 0
+
+
+def purge_posts(channel_id: int, message_ids: list[int]) -> int:
+    """v4.2: multiple channel posts ek hi delete-event me purge."""
+    if not channel_id or not message_ids:
+        return 0
+    try:
+        r = get_db()["channel_posts"].delete_many({
+            "channel_id": int(channel_id),
+            "message_id": {"$in": [int(x) for x in message_ids]},
+        })
+        return int(getattr(r, "deleted_count", 0) or 0)
+    except Exception:
+        return 0
+
+
+def mtproto_backfill(channel_id: int) -> dict:
+    """v4.2: ID-range scan — bot ke miss hue naye posts ingest karo.
+
+    GetHistory bots ke liye blocked hai (live-tested), par ID scan se
+    same result: [max_stored+1 .. max_stored+SCAN_WINDOW]. Bot offline
+    tha, ya bot channel me add hone se pehle ke posts — sab aa jaate
+    hain. MTProto down ho to {'skipped': 1}."""
+    try:
+        import mtproto_layer
+        if not mtproto_layer.is_connected():
+            return {"skipped": 1}
+        top = max_post_id(channel_id)
+        posts = mtproto_layer.scan_channel_window(channel_id, top + 1,
+                                                  config.MTPROTO_SCAN_WINDOW)
+        added = 0
+        for p in posts:
+            if ingest_mtproto_post(channel_id, p):
+                added += 1
+        return {"scanned_from": top + 1, "found": len(posts), "added": added}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": repr(exc)[:200]}
+
+
+def mtproto_reconcile(channel_id: int, limit: int = 200) -> dict:
+    """v4.2: stored posts ka LIVE truth-check — deleted => purge.
+
+    Purana reconcile (v3.x) sirf TTL guesses karta tha kyunki Bot API
+    post listing nahi deta. Ab MTProto se stored IDs batch-verify hote
+    hain (channels.getMessages) — private channels bhi cover, aur
+    unknown (network fail) par KUCH nahi delete hota (fail-safe)."""
+    try:
+        import mtproto_layer
+        if not mtproto_layer.is_connected():
+            return {"skipped": 1}
+        docs = list(get_db()["channel_posts"].find(
+            {"channel_id": int(channel_id)}))
+        docs.sort(key=lambda d: (d.get("date") or 0), reverse=True)
+        docs = docs[: max(1, int(limit))]
+        ids = [int(d["message_id"]) for d in docs if d.get("message_id")]
+        if not ids:
+            return {"checked": 0, "purged": 0}
+        verdicts = mtproto_layer.verify_posts(channel_id, ids)
+        purged = 0
+        checked = 0
+        for mid in ids:
+            v = verdicts.get(mid)
+            if v is None:
+                continue
+            checked += 1
+            if v is False:
+                purged += purge_posts(channel_id, [mid])
+        return {"checked": checked, "purged": purged,
+                "unknown": len(ids) - checked}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": repr(exc)[:200]}
+
+
+def managed_channel_ids() -> list[int]:
+    """v4.2: jis channels ko realtime sync karna hai (links + state)."""
+    try:
+        db = get_db()
+        chans: set[int] = set()
+        for lnk in db["links"].find({"channel_id": {"$exists": True, "$ne": None}}):
+            cid = lnk.get("channel_id")
+            if isinstance(cid, int):
+                chans.add(cid)
+        cid = get_state("channel_id")
+        if isinstance(cid, int):
+            chans.add(cid)
+        return sorted(chans)
+    except Exception:
+        return []
 
 
 def forget_query(query: str) -> int:

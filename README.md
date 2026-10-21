@@ -1,11 +1,45 @@
-# RK Manager Agent 🤖 v4.1 MULTI-PROVIDER + MERCURY 3
+# RK Manager Agent 🤖 v4.2 REALTIME AGENT (MTProto)
 
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
-**v4.1 adds Mercury 3 (Inception Labs) as a full AI provider** with
-owner-switchable text/vision providers + multi-admin support.
+**v4.2 adds a REALTIME MTProto power layer** (owner ke API ID/Hash se,
+same bot token) — live delete/edit events, channel+group message fetch
+by ID, history backfill aur privacy-proof group context.
 
-## v4.1 MULTI-PROVIDER kit (owner request: Mercury 3 add + provider switch + group admins)
+## v4.2 REALTIME KIT (owner request: API ID/Hash se full realtime access)
+
+Owner ka brief: *"API ID/Hash use kro taki agent ki power badh jaaye aur
+sabhi channel group ke message khud realtime me dekh paaye — old, new,
+available sb kuch — real agent ki tarah."*
+
+| Capability (live-verified) | Kaise |
+|---|---|
+| **Realtime DELETE events** — jo channel/group me udaya gaya wo memory se **<3s** me gayab | MTProto `UpdateDeleteChannelMessages` (Bot API ye event KABHI nahi deta). `mtproto_layer.py` thread 24x7 sunta hai; `bot._apply_mtproto_event` turant purge karta hai (channel posts + stored group messages + verify-cache dead-mark) |
+| **Realtime EDIT sync** | `UpdateEditChannelMessage` → managed channel ke post ka naya text turant DB me |
+| **Channel history — bot add hone se pehle ke posts + bot offline gap** | GetHistory bots ke liye blocked hai (live-tested `BotMethodInvalidError`), isliye **ID-range scan**: `[max_stored+1 .. +SCAN_WINDOW]` tak `channels.getMessages` (100 IDs/request) — jo mile wo ingest, deleted IDs khud-filter. Har `MTPROTO_BACKFILL_MINUTES` (15) cycle |
+| **Live truth-check (reconcile)** | Stored posts batch-verify — deleted => purge, unknown => untouched (fail-safe). Private channels bhi (purana HTTP t.me probe sirf public ke liye tha) |
+| **Group answers ka LIVE context ("dumb answers" fix)** | `fetch_group_context`: current message se pehle ke N messages MTProto se — **privacy mode ON ho tab bhi** (ID-fetch ko privacy touch nahi karta). Prompt me `LIVE GROUP CHAT` block — model asli conversation dekh kar jawab deta hai |
+| **verify.py 2-layer** | MTProto authoritative verdict pehle (~0.1-0.3s, private bhi); layer down => purana HTTP probe fallback |
+| **Graceful degradation** | Bina API ID/telethon ke bhi bot 100% chalta hai (layer disabled, sab fetch empty) — tests is contract ko lock karte hain |
+
+Live-proof (is session me, real bot + real chats): delete-event group
+message #2407 Bot API se delete hote hi MTProto pipeline me aaya;
+`verify_posts` ne deleted #349/#350 → `False`, live #354 → `True` diya;
+group context me real conversation fetch hui. **394 tests pass.**
+
+Env knobs (naye): `MTPROTO_API_ID`, `MTPROTO_API_HASH`,
+`MTPROTO_ENABLED` (1), `MTPROTO_SCAN_WINDOW` (200),
+`MTPROTO_GROUP_CONTEXT` (15), `MTPROTO_BACKFILL_MINUTES` (15),
+`MTPROTO_SESSION` (optional override; warna session Mongo `state` me
+persist hoti hai — Render restarts survive).
+
+> **Ek zaroori BotFather step (one-time, owner kare):** group me har
+> message dikhaane ke liye `@BotFather` → `/setprivacy` →
+> @rkgamermanagerbot → **Disable**. (MTProto ID-fetch privacy-proof hai,
+> par live push-stream ke liye privacy off chahiye.) Channel posts me
+> privacy ka issue nahi hai — wahan sab posts members ko dikhte hain.
+
+## v4.1 MULTI-PROVIDER (Mercury 3) — previous
 
 Owner ke live issues — root cause + fix + tests (362 total pass):
 

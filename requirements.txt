@@ -1,1 +1,2 @@
 pymongo[srv]>=4.6
+telethon>=1.40
