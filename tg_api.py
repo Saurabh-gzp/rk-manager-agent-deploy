@@ -467,6 +467,8 @@ def set_webhook(url, secret_token=None) -> dict:
         "allowed_updates": [
             "message", "callback_query", "my_chat_member",
             "channel_post", "edited_channel_post",
+            # v5.0: member join/leave/promote events (welcome system)
+            "chat_member",
         ],
     })
 
@@ -571,3 +573,41 @@ def set_message_reaction(chat_id, message_id, emoji: str = "👍") -> dict:
         "chat_id": chat_id, "message_id": message_id,
         "reaction": [{"type": "emoji", "emoji": emoji}],
     })
+
+
+# --- v5.0 MAX POWER: polls + invite links ---
+
+def send_poll(chat_id, question: str, options: list[str],
+              is_anonymous: bool = True, reply_to_message_id=None) -> dict:
+    """Asli Telegram poll (Bot API sendPoll)."""
+    return api("sendPoll", {
+        "chat_id": chat_id,
+        "question": question,
+        "options": json.dumps(options),
+        "is_anonymous": is_anonymous,
+        "reply_to_message_id": reply_to_message_id,
+    })
+
+
+def create_chat_invite_link(chat_id, name: str | None = None,
+                            member_limit: int | None = None,
+                            expire_hours: int | None = None,
+                            creates_join_request: bool = False) -> dict:
+    """Naya invite link (Bot API createChatInviteLink). Bot ko admin +
+    'Invite users via link' right chahiye."""
+    import time as _t
+    params: dict = {"chat_id": chat_id}
+    if name:
+        params["name"] = name[:32]
+    if member_limit:
+        params["member_limit"] = min(max(int(member_limit), 1), 99999)
+    if expire_hours:
+        params["expire_date"] = int(_t.time()) + int(expire_hours) * 3600
+    if creates_join_request:
+        params["creates_join_request"] = True
+    return api("createChatInviteLink", params)
+
+
+def revoke_chat_invite_link(chat_id, invite_link: str) -> dict:
+    return api("revokeChatInviteLink", {
+        "chat_id": chat_id, "invite_link": invite_link})

@@ -133,3 +133,30 @@ MTPROTO_GROUP_CONTEXT = _int("MTPROTO_GROUP_CONTEXT", 15)
 # Backfill + live-reconcile cycle (minutes). Har cycle: missed posts ingest
 # + stored posts batch-verify (deleted => purge).
 MTPROTO_BACKFILL_MINUTES = max(3, _int("MTPROTO_BACKFILL_MINUTES", 15))
+
+# --- v5.0 MAX POWER AGENT knobs ---
+# RADAR: managed supergroup ke NAYE messages MTProto ID-scan se dekhna
+# (Bot API privacy mode ON ho tab bhi — bot sab kuch realtime dekhta hai).
+RADAR_ENABLED = _int("RADAR_ENABLED", 1)
+RADAR_SECONDS = max(2, _int("RADAR_SECONDS", 5))     # scan cadence
+RADAR_BATCH = max(10, _int("RADAR_BATCH", 40))       # ids per scan
+RADAR_MAX_BATCHES = max(1, _int("RADAR_MAX_BATCHES", 5))  # burst catch-up
+# WATCHDOG: member ka genuine help-sawal jispe silence gaya, utni der
+# baad koi insaan jawab na de to bot khud jawab deta hai.
+WATCHDOG_ENABLED = _int("WATCHDOG_ENABLED", 1)
+UNANSWERED_TIMEOUT = max(20, _int("UNANSWERED_TIMEOUT", 90))
+WATCHDOG_CHECK = max(5, _int("WATCHDOG_CHECK", 10))
+# WELCOME: naye members ka swagat + leave/ban alerts.
+WELCOME_ENABLED = _int("WELCOME_ENABLED", 1)
+# REACTIONS: bot ke jawab pe 'thanks' -> emoji react.
+REACTIONS_ENABLED = _int("REACTIONS_ENABLED", 1)
+# FLOOD GUARD: per-user burst/rate limits (warn -> auto-mute).
+FLOOD_ENABLED = _int("FLOOD_ENABLED", 1)
+FLOOD_BURST = _int("FLOOD_BURST", 8)
+FLOOD_BURST_WINDOW = _int("FLOOD_BURST_WINDOW", 10)
+FLOOD_RATE = _int("FLOOD_RATE", 25)
+FLOOD_RATE_WINDOW = _int("FLOOD_RATE_WINDOW", 60)
+FLOOD_MUTE_MINUTES = _int("FLOOD_MUTE_MINUTES", 10)
+# TOOL LOOP: ek sawal pe max kitne TOOL: rounds (SEARCH/GETMSG/RECENT/
+# USER/PINNED/FILES/INFO/ADMINLOG/LINKCHECK).
+TOOL_MAX_ROUNDS = max(1, _int("TOOL_MAX_ROUNDS", 3))

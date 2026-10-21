@@ -31,6 +31,8 @@ BOT_COMMANDS_PUBLIC = [
     {"command": "files", "description": "Channel ki files/media list"},
     {"command": "id", "description": "Chat aur user ID info"},
     {"command": "stats", "description": "Group stats"},
+    {"command": "remind", "description": "Reminder: /remind 30m <text>"},
+    {"command": "reminders", "description": "Pending reminders dekho"},
     {"command": "report", "description": "Message report karo (admin ko)"},
     {"command": "rules", "description": "Group rules dekho"},
     {"command": "admin", "description": "Admin/owner se baat karao"},
@@ -50,6 +52,9 @@ BOT_COMMANDS_ADMINS = [
     {"command": "filter", "description": "Rose filter: word par content mile"},
     {"command": "filters", "description": "Filters list dekho"},
     {"command": "modlog", "description": "Mod actions history"},
+    {"command": "invite", "description": "Invite link banao: /invite [limit] [hours]"},
+    {"command": "poll", "description": "Poll: /poll Q | opt1 | opt2"},
+    {"command": "slowmode", "description": "Slow mode: /slowmode 10 | off"},
 ]
 
 BOT_COMMANDS_OWNER = [
@@ -72,6 +77,8 @@ HELP_TEXT = (
     "• /files — channel ki files list\n"
     "• /id — chat/user ID info\n"
     "• /stats — group stats\n"
+    "• /remind 30m &lt;text&gt; — reminder lagao\n"
+    "• /reminders — pending reminders\n"
     "• /report — kisi message pe reply karke report\n"
     "• /rules — group rules\n"
     "• /admin &lt;note&gt; — admin se baat\n\n"
@@ -85,7 +92,10 @@ HELP_TEXT = (
     "• /purge — spam bulk-clean (reply + count)\n"
     "• /pin / /unpin — messages pin/unpin\n"
     "• /filter &lt;word&gt; — Rose filter: reply karke save, word par content mile\n"
-    "• /modlog — action history\n\n"
+    "• /modlog — action history\n"
+    "• /invite [limit] [ghante] — naya invite link\n"
+    "• /poll Q | opt1 | opt2 — poll banao\n"
+    "• /slowmode 10 | off — slow mode\n\n"
     "👑 <b>Owner only:</b>\n"
     "• /kick /ban /unban\n"
     "• /users — kaun kitna active hai (users list)\n"

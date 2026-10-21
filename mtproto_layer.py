@@ -53,6 +53,8 @@ try:  # pragma: no cover - environment-dependent
     from telethon import TelegramClient, events
     from telethon.sessions import StringSession
     from telethon.tl.functions.channels import GetMessagesRequest
+    from telethon.tl.functions.channels import GetAdminLogRequest
+    from telethon.tl.functions.channels import ToggleSlowModeRequest
     _TELETHON_OK = True
 except Exception:  # noqa: BLE001
     _TELETHON_OK = False
@@ -87,6 +89,30 @@ _EVENTS_LOCK = threading.Lock()
 # har fetch par network roundtrip save hoti hai)
 _ENTITY_CACHE: dict[int, Any] = {}
 _ENTITY_LOCK = threading.Lock()
+
+# v5.0: per-chat highest message id dikhna (radar + hot path dono update
+# karte hain; RECENT tool / watchdog isse use karte hain)
+_LATEST_MSG_ID: dict[int, int] = {}
+_LATEST_LOCK = threading.Lock()
+
+
+def note_message_id(chat_id: int, mid: int) -> None:
+    """Hot path / radar se dekha gaya max message id update (thread-safe)."""
+    try:
+        cid = int(chat_id or 0)
+        m = int(mid or 0)
+        if not cid or not m:
+            return
+        with _LATEST_LOCK:
+            if m > _LATEST_MSG_ID.get(cid, 0):
+                _LATEST_MSG_ID[cid] = m
+    except Exception:
+        pass
+
+
+def latest_group_message_id(chat_id: int) -> int:
+    with _LATEST_LOCK:
+        return int(_LATEST_MSG_ID.get(int(chat_id or 0), 0))
 
 
 def _log(*args) -> None:
@@ -186,6 +212,15 @@ def _parse_message(m: Any) -> dict | None:
                     "text": "", "file_name": None, "file_type": None,
                     "grouped_id": None, "author": ""}
         text = (m.message or "").strip()
+        # v5.0: group messages ke liye sender_id (radar naam cache se
+        # resolve karta hai; channels me post_author hota hai)
+        sender_id = 0
+        try:
+            sid = getattr(m, "sender_id", None)
+            if sid:
+                sender_id = int(sid)
+        except Exception:
+            sender_id = 0
         file_name = None
         file_type = None
         media = getattr(m, "media", None)
@@ -248,6 +283,7 @@ def _parse_message(m: Any) -> dict | None:
             "alive": True,
             "date": date_unix,
             "text": text,
+            "sender_id": sender_id,
             "file_name": file_name,
             "file_type": file_type,
             "grouped_id": (str(m.grouped_id) if getattr(m, "grouped_id", None) else None),
@@ -379,6 +415,129 @@ def fetch_group_context(chat_id: int, around_id: int, before: int = 12,
         p = raw.get(mid)
         if p and p.get("alive"):
             p["chat_id"] = int(chat_id)
+            out.append(p)
+            note_message_id(chat_id, mid)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# v5.0 POWER APIs — admin log + slow mode + radar support
+# ---------------------------------------------------------------------------
+
+
+def _describe_admin_action(action: Any) -> str:
+    """ChannelAdminLogEventAction* -> ek line insaan-padhne-layak."""
+    try:
+        n = type(action).__name__
+        if n == "ChannelAdminLogEventActionDeleteMessage":
+            return "deleted a message"
+        if n == "ChannelAdminLogEventActionEditMessage":
+            return "edited a message"
+        if n == "ChannelAdminLogEventActionChangeTitle":
+            return f"changed title to '{getattr(action, 'new_value', '')}'"
+        if n == "ChannelAdminLogEventActionChangeAbout":
+            return "changed the description"
+        if n == "ChannelAdminLogEventActionChangeUsername":
+            return f"changed username to @{getattr(action, 'new_value', '')}"
+        if n == "ChannelAdminLogEventActionPinMessage":
+            return "pinned a message"
+        if n == "ChannelAdminLogEventActionUnpinMessage":
+            return "unpinned a message"
+        if n == "ChannelAdminLogEventActionInvite":
+            return "invited a member"
+        if n == "ChannelAdminLogEventActionBan":
+            return "banned a member"
+        if n == "ChannelAdminLogEventActionToggleSlowMode":
+            return (f"set slow mode to {getattr(action, 'new_value', 0)}s")
+        if n == "ChannelAdminLogEventActionStopMessage":
+            return "deleted a message (stop)"
+        if n == "ChannelAdminLogEventActionInviteToGroup":
+            return "invited a member to the group"
+        # generic — last word of class name
+        base = n.replace("ChannelAdminLogEventAction", "")
+        return base.replace("_", " ").lower()
+    except Exception:
+        return "did an admin action"
+
+
+def get_admin_log(channel_id: int, limit: int = 10) -> str:
+    """Channel ke recent ADMIN ACTIONS (kisne delete/edit/pin/ban kiya).
+
+    MTProto channels.getAdminLog — bot ko channel admin + 'admin log
+    read' right chahiye. Fail par TOOL_ERROR-style honest string.
+    """
+    if not is_connected():
+        return "TOOL_ERROR: realtime layer not connected right now."
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _admin_log(int(channel_id), int(limit)), _LOOP)
+        return fut.result(timeout=_REQUEST_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001
+        return f"TOOL_ERROR: admin log failed ({exc!r})"
+
+
+async def _admin_log(channel_id: int, limit: int) -> str:
+    entity = await _resolve_entity(channel_id)
+    r = await _CLIENT(GetAdminLogRequest(
+        channel=entity,
+        q="",
+        min_id=0, max_id=0,
+        limit=min(max(limit, 1), 50),
+    ))
+    lines = []
+    # users map: user_id -> name
+    users = {}
+    for u in (getattr(r, "users", None) or []):
+        try:
+            users[int(u.id)] = ((u.first_name or u.username) or str(u.id)).strip()
+        except Exception:
+            pass
+    for ev in (getattr(r, "events", None) or [])[-limit:]:
+        try:
+            when = time.strftime("%d %b %H:%M", time.gmtime(ev.date.timestamp()))
+        except Exception:
+            when = "?"
+        who = users.get(int(getattr(ev, "user_id", 0) or 0), "admin")
+        what = _describe_admin_action(getattr(ev, "action", None))
+        lines.append(f"- [{when} UTC] {who}: {what}")
+    if not lines:
+        return "(admin log empty — no recent admin actions)"
+    return "recent channel admin log:\n" + "\n".join(lines)
+
+
+def toggle_slow_mode(chat_id: int, seconds: int) -> dict:
+    """Supergroup slow mode ON/OFF via MTProto (Bot API iska method nahi
+    deta). seconds=0 -> OFF. Bot ko admin + Change Group Settings right
+    chahiye. Returns {ok, description|seconds}."""
+    if not is_connected():
+        return {"ok": False, "description": "realtime layer not connected"}
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _slow_mode(int(chat_id), max(0, int(seconds))), _LOOP)
+        return fut.result(timeout=_REQUEST_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "description": repr(exc)[:200]}
+
+
+async def _slow_mode(chat_id: int, seconds: int) -> dict:
+    entity = await _resolve_entity(chat_id)
+    await _CLIENT(ToggleSlowModeRequest(channel=entity, slowmode_seconds=seconds))
+    return {"ok": True, "seconds": seconds}
+
+
+def scan_group_window(chat_id: int, from_id: int, count: int) -> list[dict]:
+    """RADAR: supergroup me [from_id .. from_id+count-1] scan -> alive msgs.
+    Bot API privacy mode se miss hue messages ko MTProto se dekhne ka
+    engine (channels.getMessages supergroups par bhi chalta hai)."""
+    count = max(1, min(int(count), 400))
+    ids = list(range(int(from_id), int(from_id) + count))
+    raw = fetch_messages(chat_id, ids)
+    out = []
+    for mid in ids:
+        p = raw.get(mid)
+        if p and p.get("alive"):
+            p["chat_id"] = int(chat_id)
+            note_message_id(chat_id, mid)
             out.append(p)
     return out
 

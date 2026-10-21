@@ -17,6 +17,8 @@ import links
 import rules
 import tg_api
 import verify  # v4.0 TRUTH LAYER
+import agent_tools  # v5.0 MAX POWER: real tool loop
+import powers  # v5.0: member cards + welcome/invites/polls/reminders
 
 
 # The bot's real moderation powers. Stated in the prompt so the model never
@@ -50,6 +52,20 @@ _CAPABILITIES = (
     "memory se turant gayab ho jate hain, aur har channel link jo tum "
     "mention karo live verify hota hai. Purane/context blocks vs LIVE "
     "block me conflict ho to LIVE block ko authoritative maano. "
+    "v5.0 REAL TOOLS (sab LIVE data chalate hain): TOOL: SEARCH <query> "
+    "(deep memory search), TOOL: GETMSG <id> (koi bhi message Telegram "
+    "se by id — deleted ka sach bhi), TOOL: RECENT <n> (live recent "
+    "chat), TOOL: USER <naam> (member ka poora profile: role, join "
+    "date, activity, unke sawal-jawab), TOOL: PINNED (pinned message), "
+    "TOOL: FILES <query> (channel files listing), TOOL: INFO (live "
+    "members/admins/channel facts), TOOL: ADMINLOG <n> (channel me "
+    "kisne kya delete/edit kiya — admin log), TOOL: LINKCHECK <url> "
+    "(kisi bhi link ka real target/status). "
+    "Group manager powers jo tum sach me chalate ho (mention karo to "
+    "honestly batao): naye members ka swagat, flood-guard auto-mute, "
+    "invite links (/invite), polls (/poll), reminders (/remind '30m "
+    "<text>' ya '10 min baad yaad dila dena'), slow mode (/slowmode "
+    "<sec>). "
 )
 
 
@@ -105,7 +121,7 @@ SYSTEM_PROMPT = (
     "deta hu', 'bhej raha hu' — these are LIES because nothing happens "
     "after your reply. If you don't know something right now, say so "
     "honestly ('abhi mere paas ye info nahi hai'). If a check is truly "
-    "needed, use the LOOKUP: mechanism — the SYSTEM runs it instantly. "
+    "needed, use the TOOL: mechanism — the SYSTEM runs it instantly. "
     "FILE HONESTY (CRITICAL — never violate): you write TEXT only — "
     "you cannot attach files yourself. But the SYSTEM (not you) is a "
     "REAL delivery engine: when the user asks for an app/loader/file/key "
@@ -187,10 +203,15 @@ SYSTEM_PROMPT = (
     "acknowledgement first, then details): separate messages with a line "
     "containing only <SPLIT>. "
     "If the user asks something you should verify first (e.g. 'new loader "
-    "konsa aaya') and the context above is not enough, do NOT guess — reply "
-    "with exactly: LOOKUP: <search query>. The system will then run a real "
-    "deeper search instantly and ask you again with fresh results. Use "
-    "LOOKUP only when a real check is needed, never for chit-chat. "
+    "konsa aaya', 'kisne delete kiya', 'ye member kaun hai', 'pinned me "
+    "kya hai') and the context above is not enough, do NOT guess — reply "
+    "with exactly one line: TOOL: <NAME> <args> (e.g. TOOL: SEARCH naya "
+    "loader, TOOL: USER rich, TOOL: GETMSG 1523, TOOL: ADMINLOG 10). "
+    "The system runs the REAL tool instantly and asks you again with "
+    "fresh LIVE results; then answer. Max 3 tool calls per question; for "
+    "simple questions answer directly without tools. Never invent what "
+    "a tool could have told you — if you didn't call it, say you don't "
+    "have that record. "
     "Action honesty — CRITICAL: you have NO power to delete/mute/ban/"
     "unmute/pin/kick by writing about it. NEVER write 'delete kar diya', "
     "'mute kar diya', 'unmute kar diya', 'uda diya' — and NEVER promise "
@@ -656,6 +677,36 @@ def _maybe_deep_lookup(first_text: str | None, question: str,
     return final, interim
 
 
+# v5.0 MAX POWER — REAL TOOL LOOP (LOOKUP: ka superset) ======================
+
+
+def _run_tools(question: str, first_text: str | None, user_ctx: dict,
+               system: str) -> tuple[str | None, str | None]:
+    """Multi-round TOOL loop — model live data maangta hai, system nikaalta hai.
+
+    - TOOL: <NAME> <args> protocol (agent_tools.parse_tool_request)
+    - LOOKUP: <query> (v4.x legacy) -> TOOL: SEARCH me map
+    - max TOOL_MAX_ROUNDS rounds, phir final answer
+    - pehle tool call par 'Ruko bhai, live check kar raha hu 🔍' interim
+    """
+    chat_id = user_ctx.get("chat_id")
+
+    def _notify():
+        if chat_id:
+            tg_api.send_message(
+                chat_id, "Ruko bhai, live check kar raha hu 🔍")
+
+    def _gen(prompt: str, sys: str, ctx: dict) -> str:
+        return _generate_answer(prompt, sys, ctx)
+
+    try:
+        return agent_tools.run_tool_loop(
+            question, first_text or "", user_ctx, _gen, system,
+            notify_interim=_notify)
+    except Exception:
+        return first_text, None
+
+
 _RULE_LINE_RE = re.compile(r"^RULE:\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -1085,6 +1136,15 @@ def answer(question: str, user_ctx: dict) -> dict:
             "honestly you don't have it right now and suggest the owner "
             "share it (channel /post ya /filter word se).\n\n"
         )
+    # v5.0: sender ka member-card (long-term relational memory) — 'ye kaun
+    # hai / isne pehle kya pucha tha' personalization ka fuel. Fail-safe.
+    card_block = ""
+    try:
+        _uid = user_ctx.get("user_id")
+        if _uid and user_ctx.get("group"):
+            card_block = powers.member_card_block(int(_uid))
+    except Exception:
+        card_block = ""
     # v3.1 — INSTRUCTION HIERARCHY hard enforcement: a MEMBER trying to
     # teach standing behavior ('isko bhija kar koi puche tab') gets a
     # refusal FACT injected, so the model can never 'accept' it — the
@@ -1107,6 +1167,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             (standing + "\n\n" if standing else "")
             + (f"{facts_block}\n\n" if facts_block else "")
             + (f"{log_block}\n\n" if log_block else "")
+            + (f"{card_block}\n\n" if card_block else "")
             + live_block
             + f"Context (learned from channel + group):\n{ctx_block}\n\n"
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
@@ -1117,8 +1178,8 @@ def answer(question: str, user_ctx: dict) -> dict:
         )
         try:
             text = _generate_answer(prompt, SYSTEM_PROMPT, user_ctx)
-            text, interim = _maybe_deep_lookup(text, question, user_ctx,
-                                               SYSTEM_PROMPT)
+            text, interim = _run_tools(question, text, user_ctx,
+                                        SYSTEM_PROMPT)
             text, _ = _extract_rule(text, user_ctx, question)
             text = sanitize_claims(text)
             # v3.3: fabricated post links (#245 instead of #197) are
@@ -1189,6 +1250,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             (standing + "\n\n" if standing else "")
             + (f"{facts_block}\n\n" if facts_block else "")
             + (f"{log_block}\n\n" if log_block else "")
+            + (f"{card_block}\n\n" if card_block else "")
             + live_block
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
             + file_fact
@@ -1196,8 +1258,7 @@ def answer(question: str, user_ctx: dict) -> dict:
             + f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:"
         )
         text = _generate_answer(qprompt, GENERAL_PROMPT, user_ctx)
-        text, interim = _maybe_deep_lookup(text, question, user_ctx,
-                                           GENERAL_PROMPT)
+        text, interim = _run_tools(question, text, user_ctx, GENERAL_PROMPT)
         text, _ = _extract_rule(text, user_ctx, question)
         text = sanitize_claims(text)
         # v4.0 TRUTH LAYER + unrequested-key guard — general path par bhi

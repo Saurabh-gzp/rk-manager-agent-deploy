@@ -222,10 +222,34 @@ def handle_owner_command(msg) -> bool:
                             f"-{last_sync.get('purged', 0)} deleted verify")
         except Exception:
             pass
+        # v5.0 MAX POWER: naye superpowers ka live snapshot
+        try:
+            import powers as _powers
+            import agent_tools as _agent_tools
+            import bot as _bot_mod
+            ps = _powers.powers_status()
+            ts = _agent_tools.stats()
+            radar_ids = getattr(_bot_mod, "_RADAR_LAST", {})
+            radar_line = (f"Radar: 🟢 scanning (last id {max(radar_ids.values()) if radar_ids else '?'})"
+                          if radar_ids else "Radar: ⏳ seed wait (pehla message aane par ON)")
+            power_line = (
+                f"{radar_line}\n"
+                f"Watchdog: {'🟢 ON' if getattr(__import__('config'), 'WATCHDOG_ENABLED', 1) else '🔴 OFF'} "
+                f"({ps.get('pending_reminders', 0)} due-checks/min)\n"
+                f"Welcome: {'ON' if ps.get('welcome') else 'OFF'} · "
+                f"Reactions: {'ON' if ps.get('reactions') else 'OFF'} · "
+                f"Flood-guard: {'ON' if ps.get('flood_guard') else 'OFF'}\n"
+                f"Member cards: {ps.get('member_cards', 0)} profiles · "
+                f"Reminders pending: {ps.get('pending_reminders', 0)}\n"
+                f"AI tool calls: {ts.get('calls', 0)} (SEARCH/USER/RECENT/...)"
+            )
+        except Exception:
+            power_line = "v5.0 powers: n/a"
         _send(
             chat_id,
             f"Runtime status\nStorage: {store}\n"
             f"{mt_line}\n"
+            f"{power_line}\n"
             f"Group ID: {links.get_group_id() or 'not set'}\n"
             f"Channel ID: {links.get_channel_id() or 'not set'}\n"
             f"Moderation: {'ON' if moderation.is_enabled() else 'OFF'} "

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -49,6 +50,8 @@ import community  # noqa: E402
 import fmt  # noqa: E402
 import verify  # noqa: E402  # v4.0 TRUTH LAYER
 import mtproto_layer  # noqa: E402  # v4.2 REALTIME POWER LAYER
+import agent_tools  # noqa: E402  # v5.0 MAX POWER: tool loop
+import powers  # noqa: E402  # v5.0: welcome/invite/poll/remind/flood/cards
 
 
 def log(*args):
@@ -160,7 +163,18 @@ def _is_private_admin(uid: int) -> bool:
 # can see follow-ups to the bot's own messages. In-memory only.
 # maxlen=20: the ANSWER prompts also read this log (grounding for
 # past-event questions — the model sees what actually happened).
-_GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
+_GROUP_CONTEXT: dict[int, deque] = defaultdict(lambda: deque(maxlen=40))
+
+# v5.0 RADAR: uid -> best display name (Bot API messages se seekha) —
+# MTProto radar sirf sender_id deta hai, naam yahin se resolve hote hain.
+_UID_NAMES: dict[int, str] = {}
+
+
+def _uid_name(uid: int | None) -> str:
+    if not uid:
+        return "member"
+    nm = _UID_NAMES.get(int(uid))
+    return nm if nm else "member"
 
 # v3.4 anti-spam: timestamps (per chat) of the bot's UNDIRECTED replies —
 # answers the bot gave on its own judgment (LLM-gate YES / request words),
@@ -688,10 +702,15 @@ def _remember(chat_id: int, name: str, text: str,
               uid: int | None = None, is_channel: bool = False) -> None:
     text = (text or "").strip()
     if chat_id and text:
+        if uid and not is_bot:
+            try:
+                _UID_NAMES[int(uid)] = name
+            except Exception:
+                pass
         _GROUP_CONTEXT[chat_id].append(
             {"name": name, "text": text[:300], "is_bot": is_bot,
              "owner": is_owner, "uid": 0 if is_bot else uid,
-             "is_channel": is_channel})
+             "is_channel": is_channel, "ts": time.time()})
 
 
 def _is_channel_backed(msg: dict) -> bool:
@@ -721,6 +740,11 @@ def _remember_qa(uid: int, chat_id: int, question: str, answer: str | None,
             "answer": a[:2000],
             "date": date or int(time.time()),
         })
+        # v5.0: member card me sawal ka count (USER tool ka fuel)
+        try:
+            powers.card_update(uid, {"text": q}, is_question=True)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1255,12 +1279,36 @@ def handle_message(msg) -> None:
         # Only respond in the OWNER's managed group. Other groups = ignored.
         if not links.is_managed_group(chat_id):
             return
+        # v5.0 WELCOME: legacy 'X joined the group' service messages.
+        if msg.get("new_chat_members") or msg.get("left_chat_member"):
+            if powers.handle_new_chat_members_service(msg):
+                return
         # Moderation runs before ingestion so removed abusive messages are not
         # added to long-term memory.
         if moderation.handle_group_message(msg):
             return
+        # v5.0 FLOOD GUARD: per-user burst/rate limits (warn -> auto-mute).
+        # Admins/owner exempt. Flood hone par line-of-action le liya gaya.
+        if powers.flood_check(
+                chat_id, uid,
+                is_admin=(_group_role(chat_id, uid)
+                         in ("owner", "administrator"))):
+            return
+        # v5.0 RADAR: MTProto latest-id tracker ko hot path se feed karo
+        # (radar isi se naye ids scan karta hai).
+        try:
+            mtproto_layer.note_message_id(chat_id, msg.get("message_id"))
+        except Exception:
+            pass
         # Learn from every non-command non-bot message
         knowledge.ingest_message(msg)
+        # v5.0 MEMBER CARD: sender ka long-term profile update (cheap).
+        try:
+            powers.card_update(uid, msg,
+                               name=user.get("first_name"),
+                               username=user.get("username"))
+        except Exception:
+            pass
         # Remember for the reply gate's conversation context.
         # v4.0: channel-backed copies (auto-forward posts) flagged — ye
         # exchange-participant nahi hain (owner ka channel content hai).
@@ -1292,6 +1340,12 @@ def handle_message(msg) -> None:
         # Public utility commands: /help /id /stats /files /report —
         # sab members use kar sakte hain.
         if commands.handle_public_command(msg, uid, chat_id):
+            return
+
+        # v5.0 POWER COMMANDS: /invite /poll /remind /reminders /slowmode
+        # (+ unke spoken roop — 'invite link banao', 'poll banao ...',
+        # '10 min baad yaad dila dena'). Admin-only jahan action hai.
+        if _handle_power_commands(msg, uid, chat_id, text):
             return
 
         # Manual escalation: ONLY when a user explicitly asks for a human.
@@ -1336,6 +1390,10 @@ def handle_message(msg) -> None:
         reply_to = msg.get("reply_to_message") or {}
         reply_user = (reply_to.get("from") or {}).get("id")
         replied_to_bot = bool(reply_user and reply_user == _bot_id())
+        # v5.0 REACTIONS: bot ke jawab pe thanks -> ❤️ react (bot zinda
+        # mehsoos ho). Answer phir bhi normal aayega.
+        if replied_to_bot:
+            powers.maybe_react_thanks(msg, _bot_id(), chat_id)
         entities = msg.get("entities") or msg.get("caption_entities") or []
         directed = is_ask or is_mention or replied_to_bot
         prefetch_box: dict | None = None
@@ -1349,6 +1407,11 @@ def handle_message(msg) -> None:
             # kisi message pe reply karke 'isko delete/mute karo' bol sakta
             # hai; wo mod-synthesis path me parse hota hai.)
             if reply_to and not replied_to_bot and uid != config.OWNER_CHAT_ID:
+                # v5.0 WATCHDOG: ye REPLY help-sawal tha to remember karo —
+                # 90s me koi insaan jawab na de to bot khud jawab dega.
+                if triggers.is_help_seeking_question(text) and uid != config.OWNER_CHAT_ID:
+                    _watchdog_enqueue(chat_id, msg.get("message_id"), uid,
+                                      user.get("first_name") or "member", text)
                 return
             if _mentions_other_user(text, entities):
                 return
@@ -1370,6 +1433,11 @@ def handle_message(msg) -> None:
                 # message chatter/banter hai.
                 if asker_in_exchange and not (help_q
                                               or triggers.is_explicit_request(text)):
+                    # v5.0 WATCHDOG: exchange-chatter skip — par help-sawal
+                    # hote hi watchdog me daalo (koi jawab na de to rescue).
+                    if help_q:
+                        _watchdog_enqueue(chat_id, msg.get("message_id"), uid,
+                                          user.get("first_name") or "member", text)
                     return
                 # v3.5: koi TEESRA member unke beech help maang raha hai
                 # ('key kha milega') — uska sawal group ko tha, un exchange
@@ -1406,6 +1474,11 @@ def handle_message(msg) -> None:
                 gate = _should_reply_llm(text, who, chat_id,
                                          is_owner=(uid == config.OWNER_CHAT_ID))
                 if gate is False:
+                    # v5.0 WATCHDOG: gate-NO bhi help-sawal par watchdog
+                    # me chala jata hai — insaan jawab na de to bot karega.
+                    if triggers.is_help_seeking_question(text):
+                        _watchdog_enqueue(chat_id, msg.get("message_id"), uid,
+                                          user.get("first_name") or "member", text)
                     return  # clean NO — not for the bot
                 # gate is None (gate LLM ERROR): v3.3 — the OWNER never gets
                 # silence on our own infra failure (fail-open for owner).
@@ -1419,6 +1492,11 @@ def handle_message(msg) -> None:
             # ke messages hamesha serve hote hain — budget sirf bot ke apne
             # famaane-farmaan par diye gaye jawabo pe lagta hai.
             if uid != config.OWNER_CHAT_ID and not _reply_budget_ok(chat_id):
+                # v5.0 WATCHDOG: budget khatam — par sawal genuine tha;
+                # thodi der baad phir try hoga (agar koi na jawab de).
+                if triggers.is_help_seeking_question(text):
+                    _watchdog_enqueue(chat_id, msg.get("message_id"), uid,
+                                      user.get("first_name") or "member", text)
                 return
 
         # v3.4 (moved): natural-language channel-content delivery — ab sirf
@@ -1683,6 +1761,354 @@ def _start_mtproto() -> None:
         log("MTProto start failed (non-fatal):", traceback.format_exc())
 
 
+# ---------------- v5.0 MAX POWER: power commands ----------------
+
+
+_INVITE_REQUEST_RE = re.compile(
+    r"\b(invite\s*(link|links)?\s*(banao|bana|banaa|do|dedo|dena|karo|kro)"
+    r"|link\s*banao\s*invite|invite\s*system\s*banao)\b", re.IGNORECASE)
+
+
+def _handle_power_commands(msg: dict, uid: int, chat_id: int,
+                            text: str) -> bool:
+    """v5.0: /invite /poll /remind /reminders /slowmode + spoken roop.
+
+    Admin-gated jahan asli action hai (invite/poll/slowmode); reminders
+    koi bhi member apne liye set kar sakta hai (rate-limited).
+    True = handled (pipeline yahin rukti hai)."""
+    try:
+        text = (text or "").strip()
+        if not text:
+            return False
+        role = _group_role(chat_id, uid) if chat_id < 0 else "member"
+        is_priv = (uid == config.OWNER_CHAT_ID or role in ("owner", "administrator")
+                   or (config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID))
+        mid = msg.get("message_id")
+        low = text.lower()
+
+        # /invite + spoken 'invite link banao'
+        if low.startswith("/invite") or (is_priv and _INVITE_REQUEST_RE.search(text)):
+            if low.startswith("/invite") and low.startswith("/invites"):
+                pass  # /invites -> list (neechay)
+            elif low.startswith("/invite"):
+                return powers.handle_invite_command(msg, uid, chat_id, is_priv)
+            else:
+                # spoken: synthetic command
+                synth = dict(msg)
+                synth["text"] = "/invite"
+                return powers.handle_invite_command(synth, uid, chat_id, is_priv)
+        if low.startswith("/invites"):
+            links_list = powers.list_invites(chat_id)
+            tg_api.send_message(
+                chat_id, "Mere banaye invite links:\n" + ("\n".join(links_list)
+                if links_list else "(abhi koi active nahi)"),
+                reply_to_message_id=mid)
+            return True
+        if low.startswith("/revokeinvite"):
+            if not is_priv:
+                tg_api.send_message(chat_id, "Ye sirf owner/admin kar sakta hai 🙂",
+                                    reply_to_message_id=mid)
+                return True
+            n = powers.revoke_invites(chat_id)
+            tg_api.send_message(chat_id, f"🗑 {n} link(s) revoke kar diye.",
+                                reply_to_message_id=mid)
+            return True
+
+        # /poll + spoken 'poll banao Q | a | b'
+        if low.startswith("/poll"):
+            return powers.handle_poll_command(msg, uid, chat_id, is_priv)
+        if is_priv and powers.looks_like_poll_request(text):
+            parsed = powers.parse_spoken_poll(text)
+            if parsed:
+                q, opts = parsed
+                r = tg_api.send_poll(chat_id, q, opts)
+                if not r.get("ok"):
+                    tg_api.send_message(chat_id, "❌ Poll nahi ban paya.",
+                                        reply_to_message_id=mid)
+                return True
+
+        # /remind + /reminders + spoken
+        if low.startswith("/remind") and not low.startswith("/reminders"):
+            pr = powers.parse_reminder(text)
+            if pr:
+                delay, note = pr
+                doc = powers.schedule_reminder(chat_id, uid, delay, note,
+                                               reply_to=mid)
+                if doc:
+                    human = powers._human_delay(delay)
+                    tg_api.send_message(
+                        chat_id, f"⏰ Theek hai — {human} baad yaad dila dunga: "
+                        f"{note[:120]}", reply_to_message_id=mid)
+                else:
+                    tg_api.send_message(chat_id, "❌ Reminder set nahi hua.",
+                                        reply_to_message_id=mid)
+            else:
+                tg_api.send_message(
+                    chat_id, "Usage: `/remind 30m <kya yaad dilana hai>` "
+                    "(s/m/h/d, max 1 hafta)", reply_to_message_id=mid)
+            return True
+        if low.startswith("/reminders"):
+            docs = powers.pending_reminders(chat_id)
+            if not docs:
+                tg_api.send_message(chat_id, "Koi pending reminder nahi hai.",
+                                    reply_to_message_id=mid)
+            else:
+                lines = ["⏰ Pending reminders:"]
+                for i, d in enumerate(docs, 1):
+                    left = int((d.get("due_at") or 0) - time.time())
+                    lines.append(f"{i}. {d.get('note') or '?'} — "
+                                 f"{powers._human_delay(max(0, left))} baad")
+                tg_api.send_message(chat_id, "\n".join(lines),
+                                    reply_to_message_id=mid)
+            return True
+
+        # /slowmode <sec|off> — MTProto (Bot API ka method nahi)
+        if low.startswith("/slowmode"):
+            if not is_priv:
+                tg_api.send_message(chat_id, "Ye sirf owner/admin kar sakta hai 🙂",
+                                    reply_to_message_id=mid)
+                return True
+            arg = (text.split(maxsplit=1)[1].strip().lower()
+                   if len(text.split(maxsplit=1)) > 1 else "")
+            if arg in ("", "status"):
+                tg_api.send_message(
+                    chat_id, "Usage: `/slowmode 10` (10s) ya `/slowmode off`",
+                    reply_to_message_id=mid)
+                return True
+            secs = 0 if arg in ("off", "0", "band") else max(0, int(arg) if arg.isdigit() else 0)
+            r = mtproto_layer.toggle_slow_mode(chat_id, secs)
+            if r.get("ok"):
+                tg_api.send_message(
+                    chat_id, "🐌 Slow mode OFF kiya." if secs == 0
+                    else f"🐌 Slow mode {secs}s ON — members ek message ke baad "
+                         f"{secs}s wait karenge.", reply_to_message_id=mid)
+            else:
+                tg_api.send_message(
+                    chat_id, "❌ Slow mode set nahi hua — mujhe group admin + "
+                    "Change Group Settings permission chahiye.",
+                    reply_to_message_id=mid)
+            return True
+
+        # spoken reminder: '<duration> baad yaad dila dena'
+        if not text.startswith("/"):
+            pr = powers.parse_reminder(text)
+            if pr and re.search(r"\b(yaad\s*dila|remind|reminder|yaad\s*rakh)\b", low):
+                delay, note = pr
+                doc = powers.schedule_reminder(chat_id, uid, delay, note,
+                                               reply_to=mid)
+                if doc:
+                    tg_api.send_message(
+                        chat_id, f"⏰ Theek hai — {powers._human_delay(delay)} "
+                        "baad yaad dila dunga 🔔", reply_to_message_id=mid)
+                    return True
+    except Exception:
+        log("power command failed (non-fatal):", traceback.format_exc())
+    return False
+
+
+# ---------------- v5.0 RADAR: full group visibility ----------------
+
+
+def _radar_bootstrap_id(chat_id: int) -> int:
+    """Group ka max stored message-id (cold-start radar seed)."""
+    try:
+        docs = list(db.get_db()["messages"].find({"chat_id": chat_id}))
+        ids = [int(d.get("message_id") or 0) for d in docs]
+        return max(ids) if ids else 0
+    except Exception:
+        return 0
+
+
+_RADAR_LAST: dict[int, int] = {}
+
+
+def _radar_ingest(chat_id: int, p: dict) -> None:
+    """Radar-seen message ko knowledge + context me laana (dedup ke saath).
+
+    Dedup: Mongo me (chat_id, message_id) already hai to skip. Bot API
+    path bhi usi message ko ingest karega to dono me se ek hi baar.
+    """
+    mid = p.get("id")
+    text = (p.get("text") or "").strip()
+    ftype = p.get("file_type") or ""
+    fname = p.get("file_name") or ""
+    label = text or (f"[{ftype}: {fname}]" if (ftype and ftype != "photo")
+                     else f"[{ftype}]" if ftype else "")
+    if not mid or not label:
+        return
+    sender_id = p.get("sender_id") or 0
+    try:
+        exists = db.get_db()["messages"].find_one(
+            {"chat_id": chat_id, "message_id": mid})
+    except Exception:
+        exists = True  # store unhealthy — sirf context remember karo
+    if not exists:
+        synth = {
+            "chat": {"id": chat_id, "title": None},
+            "from": {"id": sender_id, "is_bot": False,
+                     "first_name": None, "username": None},
+            "message_id": mid,
+            "date": p.get("date"),
+            "text": text or None,
+            "caption": None,
+        }
+        knowledge.ingest_message(synth)
+        try:
+            powers.card_update(sender_id, synth, name=None)
+        except Exception:
+            pass
+    # context me hamesha yaad rakho (Bot API ne skip kiya ho tab bhi)
+    _remember(chat_id, _uid_name(sender_id), label, uid=sender_id)
+
+
+def _radar_loop() -> None:
+    """Managed supergroup ke NAYE messages MTProto ID-scan se dekhna.
+
+    Privacy mode ON ho tab bhi bot ab sab kuch realtime dekhta hai:
+    - context (gate/exchange detection) har message se sochta hai
+    - knowledge store me wahi messages jaate hain jo members padhte hain
+    - moderator Bot API stream par pehle hi chuka hota hai (radar sirf
+      memory deta hai, action nahi)
+    Burst catch-up: ek cycle me RADAR_MAX_BATCHES tak consecutive scan
+    (sab full mile to aur) — 100/5s = 20 msg/s tak lag nahi.
+    """
+    log("radar thread starting (MTProto ID-scan group watcher)")
+    while True:
+        try:
+            time.sleep(config.RADAR_SECONDS)
+            if not config.RADAR_ENABLED or not mtproto_layer.is_connected():
+                continue
+            gid = links.get_group_id()
+            if not gid:
+                continue
+            last = _RADAR_LAST.get(gid) or mtproto_layer.latest_group_message_id(gid)
+            if not last:
+                last = _radar_bootstrap_id(gid)
+                if last:
+                    _RADAR_LAST[gid] = last
+                continue
+            start = last + 1
+            for _ in range(int(config.RADAR_MAX_BATCHES)):
+                msgs = mtproto_layer.scan_group_window(
+                    gid, start, config.RADAR_BATCH)
+                if msgs:
+                    last = max(last, msgs[-1]["id"])
+                    start = last + 1
+                    for p in msgs:
+                        _radar_ingest(gid, p)
+                else:
+                    # window khaali — aage badh jao (phir kabhi nahi rescan)
+                    last = max(last, start + int(config.RADAR_BATCH) - 1)
+                    break
+            _RADAR_LAST[gid] = last
+        except Exception:
+            log("radar cycle failed (non-fatal):", traceback.format_exc())
+
+
+# ---------------- v5.0 WATCHDOG: unanswered-question rescuer ----------------
+
+
+_WATCHDOG_QUEUE: deque = deque(maxlen=60)
+_WATCHDOG_LOCK = threading.Lock()
+_WATCHDOG_FIRED: set = set()
+
+
+def _watchdog_enqueue(chat_id: int, msg_id, uid, name, text) -> None:
+    """Ek skipped help-sawal ko rescue-queue me daalo (max 60, deduped)."""
+    try:
+        if not config.WATCHDOG_ENABLED or not msg_id:
+            return
+        with _WATCHDOG_LOCK:
+            _WATCHDOG_QUEUE.append({
+                "chat_id": chat_id, "msg_id": int(msg_id), "uid": uid,
+                "name": name, "text": (text or "")[:400],
+                "ts": time.time()})
+    except Exception:
+        pass
+
+
+def _watchdog_still_unanswered(item: dict) -> bool:
+    """Kya YE sawal ab bhi BEJAWAB hai? Context log + MTProto live check."""
+    chat_id = item["chat_id"]
+    ts = item["ts"]
+    try:
+        ctx = _GROUP_CONTEXT.get(chat_id) or []
+        for m in list(ctx):
+            m_ts = m.get("ts") or 0
+            if m_ts and m_ts > ts and not m.get("is_channel"):
+                # koi insaan/bot ne baat ki — maan lo jawab aa gaya
+                return False
+    except Exception:
+        pass
+    # MTProto live check: question ke baad ke messages koi hain?
+    try:
+        if mtproto_layer.is_connected():
+            after = mtproto_layer.fetch_group_context(
+                chat_id, int(item["msg_id"]), before=0, after=8)
+            if after:
+                return False
+    except Exception:
+        pass
+    return True
+
+
+def _watchdog_answer(item: dict) -> None:
+    """Rescue fire: ab genuinely help-sawal ka jawab do (budget ke saath)."""
+    chat_id = item["chat_id"]
+    msg_id = item["msg_id"]
+    question = item["text"]
+    try:
+        if not _reply_budget_ok(chat_id):
+            return
+        prefetch_box = _start_answer_prefetch(question, item["uid"],
+                                              chat_id=chat_id,
+                                              message_id=msg_id)
+        _recent = [m for m in list(_GROUP_CONTEXT.get(chat_id, []))
+                   if not m.get("is_channel")][-14:]
+        ctx = {"user_id": item["uid"], "chat_id": chat_id,
+               "first_name": item.get("name"), "username": None,
+               "group": True, "group_id": chat_id,
+               "group_role": "member",
+               "bot_admin": _bot_rights(chat_id),
+               "message_id": msg_id, "media": [],
+               "recent_log": _recent, "prefetch": prefetch_box}
+        res = agent.answer(question, ctx)
+        _deliver_answer(chat_id, res, reply_to=msg_id)
+        _remember_qa(item["uid"], chat_id, question, res.get("text"))
+        _remember(chat_id, "RK Manager", (res.get("text") or "")[:300],
+                 is_bot=True)
+        log(f"watchdog rescue fired chat={chat_id} msg={msg_id}")
+    except Exception:
+        log("watchdog answer failed (non-fatal):", traceback.format_exc())
+
+
+def _watchdog_loop() -> None:
+    """Daemon: skipped help-sawal UNANSWERED_TIMEOUT baad rescue karta hai."""
+    log(f"watchdog thread starting ({config.UNANSWERED_TIMEOUT}s patience)")
+    while True:
+        try:
+            time.sleep(config.WATCHDOG_CHECK)
+            now = time.time()
+            due = []
+            with _WATCHDOG_LOCK:
+                rest = deque()
+                while _WATCHDOG_QUEUE:
+                    it = _WATCHDOG_QUEUE.popleft()
+                    age = now - it["ts"]
+                    if age >= config.UNANSWERED_TIMEOUT:
+                        if it["msg_id"] not in _WATCHDOG_FIRED:
+                            _WATCHDOG_FIRED.add(it["msg_id"])
+                            due.append(it)
+                    elif age < 3600:
+                        rest.append(it)
+                _WATCHDOG_QUEUE.extend(rest)
+            for it in due[:3]:
+                if _watchdog_still_unanswered(it):
+                    _watchdog_answer(it)
+        except Exception:
+            log("watchdog cycle failed (non-fatal):", traceback.format_exc())
+
+
 # ---------------- run modes ----------------
 
 
@@ -1740,7 +2166,13 @@ def run_polling() -> None:
         except Exception:
             log("reconcile failed:", traceback.format_exc())
         try:
-            updates = tg_api.get_updates(offset=offset, timeout=config.POLL_TIMEOUT)
+            updates = tg_api.get_updates(
+                offset=offset, timeout=config.POLL_TIMEOUT,
+                allowed_updates=[
+                    "message", "callback_query", "my_chat_member",
+                    "channel_post", "edited_channel_post",
+                    "chat_member",
+                ])
             backoff = 1
         except Exception:
             log(f"getUpdates error, backoff {backoff}s")
@@ -1771,6 +2203,9 @@ def _dispatch_update(u) -> None:
         handle_channel_post(u["edited_channel_post"])
     elif "callback_query" in u:
         handle_callback_query(u["callback_query"])
+    elif "chat_member" in u:
+        # v5.0 WELCOME: member join/leave/promote events
+        powers.handle_chat_member(u)
     elif "message" in u:
         handle_message(u["message"])
 
@@ -1803,7 +2238,7 @@ def run_webhook() -> None:
                 try:
                     payload = {
                         "ok": True,
-                        "version": "4.2-realtime-agent",
+                        "version": "5.0-max-power-agent",
                         "storage": "mongo" if db.is_persistent() else "memory",
                         "last_sweep": verify.last_sweep(),
                         "probe_cache": verify.stats().get("cached_probes", 0),
@@ -1814,6 +2249,10 @@ def run_webhook() -> None:
                             {"name": p.name, "kind": p.kind, "keys": len(p.pool.keys)}
                             for p in ai_engine.get_router().providers
                         ],
+                        "v50_powers": powers.powers_status(),
+                        "tools": agent_tools.stats(),
+                        "radar_last_id": _RADAR_LAST,
+                        "watchdog_queue": len(_WATCHDOG_QUEUE),
                         "ts": int(time.time()),
                     }
                 except Exception as exc:  # noqa: BLE001
@@ -1869,7 +2308,7 @@ def run_webhook() -> None:
 
 
 def main() -> None:
-    log("starting RK Manager Agent v4.2 (REALTIME AGENT)…")
+    log("starting RK Manager Agent v5.0 (MAX POWER AGENT)…")
     log(f"owner={config.OWNER_CHAT_ID} admin={config.ADMIN_CHAT_ID or config.OWNER_CHAT_ID}")
     log(f"gemini_keys={len(config.GEMINI_KEYS)} deepseek={'yes' if config.DEEPSEEK_KEY else 'no'} "
         f"mercury_keys={len(config.MERCURY_KEYS)}")
@@ -1880,6 +2319,26 @@ def main() -> None:
     # v4.2 REALTIME POWER LAYER: MTProto (owner API ID/Hash) — realtime
     # delete/edit events, channel+group ID-fetch, history backfill.
     _start_mtproto()
+    # v5.0 MAX POWER: radar (full group visibility), watchdog (unanswered
+    # rescue), reminders (scheduler). Sab daemon + non-fatal.
+    try:
+        import threading
+        if config.RADAR_ENABLED:
+            threading.Thread(target=_radar_loop, daemon=True,
+                             name="rk-radar").start()
+            log("radar thread started (MTProto group watcher — privacy-proof)")
+        if config.WATCHDOG_ENABLED:
+            threading.Thread(target=_watchdog_loop, daemon=True,
+                             name="rk-watchdog").start()
+            log(f"watchdog thread started ({config.UNANSWERED_TIMEOUT}s "
+                "unanswered-question rescue)")
+        if int(getattr(config, "WELCOME_ENABLED", 1)) \
+                or int(getattr(config, "REACTIONS_ENABLED", 1)):
+            powers.start_reminder_thread()
+            log("reminder scheduler thread started")
+    except Exception:
+        log("v5.0 power threads failed to start (non-fatal):",
+            traceback.format_exc())
     # v4.0 TRUTH LAYER: background channel-post verifier (public channels
     # ka t.me probe + dead-post purge) — MTProto down hone par fallback.
     try:

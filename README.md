@@ -1,12 +1,46 @@
-# RK Manager Agent 🤖 v4.2 REALTIME AGENT (MTProto)
+# RK Manager Agent 🤖 v5.0 MAX POWER AGENT (Real Tools + Radar)
 
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
-**v4.2 adds a REALTIME MTProto power layer** (owner ke API ID/Hash se,
-same bot token) — live delete/edit events, channel+group message fetch
-by ID, history backfill aur privacy-proof group context.
+**v5.0 makes it a REAL AGENT**: a multi-round TOOL LOOP (9 live tools),
+RADAR (full group visibility even in privacy mode), watchdog rescue,
+welcome system, invite links, polls, reminders, flood guard, member
+memory cards + MTProto realtime layer (v4.2) below it all.
 
-## v4.2 REALTIME KIT (owner request: API ID/Hash se full realtime access)
+## v5.0 MAX POWER KIT (owner request: "jitna powerful bana sakte ho bana do")
+
+Owner ka brief: *"telegram ke hisab se is agent ko jitna powerful bana
+sakte ho bna do — real agent ki tarah, sb kuch access, sb tools use
+kar ke."*
+
+| Naya Power | Kaise kaam karta hai |
+|---|---|
+| **REAL TOOL LOOP** — model khud decide karta hai kaunsa tool chalana hai, 3 rounds tak | `agent_tools.py`: `TOOL: SEARCH <q>` (deep memory search), `TOOL: GETMSG <id>` (koi bhi message live — deleted ka sach bhi), `TOOL: RECENT <n>` (live chat), `TOOL: USER <naam>` (poora member profile: role/join date/activity/Q&A history), `TOOL: PINNED`, `TOOL: FILES <q>`, `TOOL: INFO` (live members/admins), `TOOL: ADMINLOG <n>` (**channel me kisne delete/edit/pin kiya** — MTProto getAdminLog), `TOOL: LINKCHECK <url>` (spoo.me/bit.ly expander + t.me liveness). Purana `LOOKUP:` ab SEARCH me map hota hai. Interim "Ruko bhai, live check kar raha hu 🔍" |
+| **RADAR — full group visibility** | Privacy mode ON ho tab bhi managed supergroup ke SAARE messages realtime dikhte hain: MTProto ID-scan har 5s (burst catch-up 5 batches), dedup ke saath knowledge + context dono me. Gate/exchange-detection ab poori conversation dekh kar sochta hai |
+| **WATCHDOG — unanswered-question rescue** | Member ka genuine help-sawal jispe bot silent raha (budget/exchange/gate) — 90s me koi insaan jawab na de to bot khud jawab deta hai (live context check karke, budget ke saath). "bot chup raha" complaint ka permanent fix |
+| **WELCOME SYSTEM** | Naye member ka swagat (24h cooldown), ban par owner DM alert, join history (`recent_joins` — 'naye members kaun aaye' ka jawab) |
+| **INVITE LINKS** | `/invite [member_limit] [expire_hours]` — asli `createChatInviteLink`; `/invites` list, `/revokeinvite`; spoken "invite link banao" admin kehne par |
+| **POLLS** | `/poll Question \| opt1 \| opt2` + spoken "poll banao Q \| a \| b" (admin) |
+| **REMINDERS** | `/remind 30m <text>` + spoken "10 min baad yaad dila dena" — Mongo-persisted (Render restart-safe), `/reminders` list, scheduler thread deliver karta hai |
+| **REACTIONS** | Bot ke jawab pe "thanks/shukriya" → ❤️ emoji reaction (rate-limited) — bot zinda mehsoos hota hai |
+| **FLOOD GUARD** | Per-user burst (8/10s) ya rate (25/60s) pe warn → repeat pe 10min auto-mute. Admins exempt |
+| **MEMBER CARDS** | Har member ka long-term profile (first seen, msg count, questions, topics) — `TOOL: USER` + prompt personalization ka fuel ("Rich bhai, aapne pehle crown loader pucha tha") |
+| **SLOW MODE** | `/slowmode 10` ya `/slowmode off` — MTProto `toggleSlowMode` (Bot API ka yeh method nahi hai) |
+| **PINNED awareness** | Pinned message context me + tool se |
+
+Naye commands: `/invite /invites /revokeinvite /poll /remind /reminders
+/slowmode` — sab admin-gated (jahan action hai), reminders sabke liye.
+
+Env knobs (naye): `RADAR_ENABLED/SECONDS/BATCH/MAX_BATCHES`,
+`WATCHDOG_ENABLED`, `UNANSWERED_TIMEOUT` (90s), `WATCHDOG_CHECK`,
+`WELCOME_ENABLED`, `REACTIONS_ENABLED`, `FLOOD_ENABLED/BURST/RATE/
+MUTE_MINUTES`, `TOOL_MAX_ROUNDS` (3).
+
+**451 tests pass** (394 v4.x + 57 naye v5.0). Live healthz ab
+`v50_powers` (radar/watchdog/cards/reminders), `tools` (tool-call
+stats), `radar_last_id`, `watchdog_queue` bhi dikhata hai.
+
+## v4.2 REALTIME KIT (owner request: API ID/Hash se full realtime access) — previous
 
 Owner ka brief: *"API ID/Hash use kro taki agent ki power badh jaaye aur
 sabhi channel group ke message khud realtime me dekh paaye — old, new,
