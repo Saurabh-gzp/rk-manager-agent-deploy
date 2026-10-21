@@ -259,28 +259,47 @@ def _mercury_call(key: str, model: str, prompt: str, system: str | None,
 
     Mercury ek diffusion LLM hai: 1000+ tokens/sec, 1M context (mercury-3).
     reasoning_effort speed vs quality control karta hai (low/medium/high).
+
+    v4.1.3 FIX: Mercury apne internal reasoning tokens bhi max_tokens budget
+    me se kharch karta hai — chhote budget par content:null +
+    finish_reason:"length" aa jata tha, jise caller "success" samajh leta tha
+    (empty jawab, no failover). Ab ek self-healing retry bade budget ke saath
+    hota hai; phir bhi khali ho to error return hota hai failover ke liye.
     """
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
-    msgs = []
-    if system:
-        msgs.append({"role": "system", "content": system})
-    msgs.append({"role": "user", "content": prompt})
-    body = {"model": model, "messages": msgs, "max_tokens": max_tokens,
-            "temperature": 0.7}
-    effort = (config.MERCURY_REASONING or "medium").lower()
-    if effort in ("low", "medium", "high"):
-        body["reasoning_effort"] = effort
-    status, payload, err = _post_json(MERCURY_BASE, body, headers, timeout)
+    def _one(budget: int) -> tuple[str, str, str]:
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {key}"}
+        msgs = []
+        if system:
+            msgs.append({"role": "system", "content": system})
+        msgs.append({"role": "user", "content": prompt})
+        body = {"model": model, "messages": msgs, "max_tokens": budget,
+                "temperature": 0.7}
+        effort = (config.MERCURY_REASONING or "medium").lower()
+        if effort in ("low", "medium", "high"):
+            body["reasoning_effort"] = effort
+        status, payload, err = _post_json(MERCURY_BASE, body, headers, timeout)
+        if err:
+            return "", "", err
+        if status >= 400:
+            msg = ((payload.get("error") or {}).get("message")
+                   or payload.get("message") or f"http {status}")
+            return "", "", msg
+        choices = payload.get("choices") or []
+        if not choices:
+            return "", "", "no choices"
+        text = ((choices[0].get("message") or {}).get("content")) or ""
+        finish = str(choices[0].get("finish_reason") or "")
+        return text, finish, ""
+
+    text, finish, err = _one(max_tokens)
+    if not err and not text and finish == "length" and max_tokens < 1024:
+        # reasoning ne budget kha liya — retry with headroom (max 1024).
+        text, finish, err = _one(min(1024, max(2 * max_tokens, 512)))
     if err:
         return "", err
-    if status >= 400:
-        msg = ((payload.get("error") or {}).get("message")
-               or payload.get("message") or f"http {status}")
-        return "", msg
-    choices = payload.get("choices") or []
-    if not choices:
-        return "", "no choices"
-    text = ((choices[0].get("message") or {}).get("content")) or ""
+    if not text:
+        return "", "empty response (mercury reasoning budget exhausted)"
     return text, ""
 
 
