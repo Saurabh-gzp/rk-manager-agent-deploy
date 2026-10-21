@@ -1920,6 +1920,51 @@ def _radar_bootstrap_id(chat_id: int) -> int:
 
 
 _RADAR_LAST: dict[int, int] = {}
+_CH_RADAR_LAST: dict[int, int] = {}
+_RADAR_CYCLE = {"n": 0}
+
+
+def _radar_channel_pass() -> None:
+    """v5.1: managed CHANNEL ka fast radar (group jaisa hi).
+
+    Pehle channel sirf 15-min backfill cycle me aata tha — isliye naye
+    posts der se memory me dikhte the ('channel ka updated message nahi
+    dikhata' bug). Ab har radar cycle (5s) me naye posts scan+ingest
+    hote hain. Cold-start par find_channel_top_id se LIVE top nikalta
+    hai. Fail-safe: koi bhi error radar thread nahi maarta.
+    """
+    if not int(getattr(config, "CHANNEL_RADAR_ENABLED", 1)):
+        return
+    cid = links.get_channel_id()
+    if not cid:
+        return
+    try:
+        last = _CH_RADAR_LAST.get(cid)
+        if not last:
+            stored = knowledge.max_post_id(cid)
+            top = mtproto_layer.find_channel_top_id(cid, floor=stored)
+            if not top and stored:
+                top = stored
+            if not top:
+                return
+            _CH_RADAR_LAST[cid] = top
+            mtproto_layer.note_message_id(cid, int(top))
+            posts = mtproto_layer.recent_channel_posts(cid, count=12)
+        else:
+            posts = mtproto_layer.scan_channel_window(
+                cid, last + 1, config.RADAR_BATCH)
+        for p in posts:
+            knowledge.ingest_mtproto_post(cid, p)
+            mtproto_layer.note_message_id(cid, int(p["id"]))
+        if posts:
+            _CH_RADAR_LAST[cid] = max(_CH_RADAR_LAST.get(cid) or 0,
+                                       int(posts[-1]["id"]))
+        elif last:
+            # window khaali — aage badho (empty windows dobara nahi scan)
+            _CH_RADAR_LAST[cid] = last + int(config.RADAR_BATCH) - 1
+    except Exception:
+        log("channel radar pass failed (non-fatal):",
+            traceback.format_exc())
 
 
 def _radar_ingest(chat_id: int, p: dict) -> None:
@@ -1969,38 +2014,54 @@ def _radar_loop() -> None:
     - knowledge store me wahi messages jaate hain jo members padhte hain
     - moderator Bot API stream par pehle hi chuka hota hai (radar sirf
       memory deta hai, action nahi)
+    v5.1: ab managed CHANNEL bhi isi loop me scan hota hai (fast
+    channel freshness) + periodic deletion-sync (purana fix).
     Burst catch-up: ek cycle me RADAR_MAX_BATCHES tak consecutive scan
     (sab full mile to aur) — 100/5s = 20 msg/s tak lag nahi.
     """
-    log("radar thread starting (MTProto ID-scan group watcher)")
+    log("radar thread starting (MTProto ID-scan group+channel watcher)")
     while True:
         try:
             time.sleep(config.RADAR_SECONDS)
             if not config.RADAR_ENABLED or not mtproto_layer.is_connected():
                 continue
             gid = links.get_group_id()
-            if not gid:
-                continue
-            last = _RADAR_LAST.get(gid) or mtproto_layer.latest_group_message_id(gid)
-            if not last:
-                last = _radar_bootstrap_id(gid)
-                if last:
-                    _RADAR_LAST[gid] = last
-                continue
-            start = last + 1
-            for _ in range(int(config.RADAR_MAX_BATCHES)):
-                msgs = mtproto_layer.scan_group_window(
-                    gid, start, config.RADAR_BATCH)
-                if msgs:
-                    last = max(last, msgs[-1]["id"])
-                    start = last + 1
-                    for p in msgs:
-                        _radar_ingest(gid, p)
+            if gid:
+                last = _RADAR_LAST.get(gid) or mtproto_layer.latest_group_message_id(gid)
+                if not last:
+                    last = _radar_bootstrap_id(gid)
+                    if last:
+                        _RADAR_LAST[gid] = last
                 else:
-                    # window khaali — aage badh jao (phir kabhi nahi rescan)
-                    last = max(last, start + int(config.RADAR_BATCH) - 1)
-                    break
-            _RADAR_LAST[gid] = last
+                    start = last + 1
+                    for _ in range(int(config.RADAR_MAX_BATCHES)):
+                        msgs = mtproto_layer.scan_group_window(
+                            gid, start, config.RADAR_BATCH)
+                        if msgs:
+                            last = max(last, msgs[-1]["id"])
+                            start = last + 1
+                            for p in msgs:
+                                _radar_ingest(gid, p)
+                        else:
+                            # window khaali — aage badh jao (phir kabhi nahi rescan)
+                            last = max(last, start + int(config.RADAR_BATCH) - 1)
+                            break
+                    _RADAR_LAST[gid] = last
+            # v5.1: managed channel ka fast pass (group na ho to bhi chale)
+            _radar_channel_pass()
+            # v5.1: periodic channel deletion-sync (stored top posts verify)
+            _RADAR_CYCLE["n"] += 1
+            cid = links.get_channel_id()
+            if (cid and int(getattr(config, "CHANNEL_RADAR_ENABLED", 1))
+                    and _RADAR_CYCLE["n"] % config.CHANNEL_SYNC_EVERY == 0):
+                try:
+                    r = knowledge.mtproto_reconcile(
+                        cid, limit=config.CHANNEL_SYNC_BATCH)
+                    if r and r.get("purged"):
+                        log("channel deletion-sync purged", r.get("purged"),
+                            "posts")
+                except Exception:
+                    pass
         except Exception:
             log("radar cycle failed (non-fatal):", traceback.format_exc())
 
@@ -2238,7 +2299,7 @@ def run_webhook() -> None:
                 try:
                     payload = {
                         "ok": True,
-                        "version": "5.0-max-power-agent",
+                        "version": "5.1-real-agent",
                         "storage": "mongo" if db.is_persistent() else "memory",
                         "last_sweep": verify.last_sweep(),
                         "probe_cache": verify.stats().get("cached_probes", 0),
@@ -2252,6 +2313,7 @@ def run_webhook() -> None:
                         "v50_powers": powers.powers_status(),
                         "tools": agent_tools.stats(),
                         "radar_last_id": _RADAR_LAST,
+                        "ch_radar_last_id": _CH_RADAR_LAST,
                         "watchdog_queue": len(_WATCHDOG_QUEUE),
                         "ts": int(time.time()),
                     }
@@ -2308,7 +2370,7 @@ def run_webhook() -> None:
 
 
 def main() -> None:
-    log("starting RK Manager Agent v5.0 (MAX POWER AGENT)…")
+    log("starting RK Manager Agent v5.1 (REAL AGENT — tools that actually fire)…")
     log(f"owner={config.OWNER_CHAT_ID} admin={config.ADMIN_CHAT_ID or config.OWNER_CHAT_ID}")
     log(f"gemini_keys={len(config.GEMINI_KEYS)} deepseek={'yes' if config.DEEPSEEK_KEY else 'no'} "
         f"mercury_keys={len(config.MERCURY_KEYS)}")

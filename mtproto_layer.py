@@ -395,6 +395,122 @@ def scan_channel_window(channel_id: int, from_id: int, count: int) -> list[dict]
     return out
 
 
+# ---------------------------------------------------------------------------
+# v5.1 REAL AGENT: live channel top-probe + recent channel posts
+# (owner issue: 'channel ka updated message nahi dikhata' — ab HAR
+#  channel-question ke waqt FRESH posts MTProto se nikalte hain)
+# ---------------------------------------------------------------------------
+
+
+def _alive_ids(chat_id: int, ids: list[int]) -> dict[int, dict]:
+    """{id: parsed} sirf ALIVE messages ke liye (deleted holes skip)."""
+    raw = fetch_messages(chat_id, ids)
+    out: dict[int, dict] = {}
+    for i in ids:
+        p = raw.get(i)
+        if p and p.get("alive"):
+            out[i] = p
+    return out
+
+
+def _probe_top_via_spread(channel_id: int) -> int:
+    """Cold-start anchor: geometric id spread, EK MTProto call. Sparse-
+    alive channels (heavy purges) me bas ANCHOR milta hai — exact top
+    _sweep_up nikaalta hai."""
+    ids = [1, 50] + [100 * (2 ** k) for k in range(0, 17)]  # 1..13.1M
+    alive = _alive_ids(channel_id, ids)
+    if not alive:
+        return 0
+    return max(alive)
+
+
+def _sweep_up(channel_id: int, from_id: int, max_windows: int = 30,
+              empty_tol: int = 4) -> int:
+    """from_id se upar 100-id windows sweep karke LIVE top nikaalo.
+
+    Deletion-gaps survive karta hai: 'owner posts purge karta hai'
+    (RK channel: alive 1, 33, 340-354 — 33 se 340 tak ~300 dead ids!).
+    Isliye EMPTY windows pe break nahi — empty_tol consecutive empty
+    windows ke baad rukta hai (post ids sequential hote hain: itna bada
+    saaf gap = top ke upar kuch nahi). empty_tol=4 → ~400-id gap cover.
+    """
+    top = 0
+    x = max(0, int(from_id or 0))
+    empties = 0
+    wins = 0
+    while wins < max_windows:
+        nxt = list(range(x + 1, x + 101))
+        a = _alive_ids(channel_id, nxt)
+        wins += 1
+        if a:
+            top = max(a)
+            x = top
+            empties = 0
+        else:
+            x += 100
+            empties += 1
+            if empties >= empty_tol:
+                break
+    return top or max(0, int(from_id or 0))
+
+
+def find_channel_top_id(channel_id: int, floor: int = 0,
+                        max_walk: int = 30) -> int:
+    """Channel ka LIVE top (latest) post id.
+
+    Fast path: floor (stored max) se upar sweep (naye posts yahin
+    hote hain — 1-4 calls typical). Cold path (floor=0): geometric
+    spread anchor + sweep. Deletion-gaps tolerate hote hain.
+    """
+    if not is_connected() or not channel_id:
+        return 0
+    floor = max(0, int(floor or 0))
+    if floor:
+        top = _sweep_up(channel_id, floor, max_windows=max_walk)
+        if top > floor:
+            return top
+        if _alive_ids(channel_id, [floor]):
+            return floor
+        # floor khud dead hai aur upar bhi kuch nahi — cold path try
+    anchor = _probe_top_via_spread(channel_id)
+    if not anchor:
+        return 0
+    return _sweep_up(channel_id, anchor, max_windows=max_walk) or anchor
+
+
+def recent_channel_posts(channel_id: int, count: int = 10,
+                         floor: int = 0) -> list[dict]:
+    """Channel ke LATEST N posts — LIVE, seedha Telegram se.
+
+    Ye 'stale channel' bug ka final fix hai: answer-time par hamesha
+    fresh. top estimate se 3x window fetch hoti hai (deleted holes + top
+    drift tolerate), phir last-N alive nikaal liye jaate hain.
+    """
+    if not is_connected() or not channel_id:
+        return []
+    count = max(1, min(int(count), 30))
+    top = latest_group_message_id(channel_id) \
+        or find_channel_top_id(channel_id, floor=floor)
+    if not top:
+        return []
+    # window: top ke NEECHE (real posts — deleted-hole tolerance 3x)
+    # + top ke UPAR 50 (stale-top drift tolerance). Ek hi fetch call.
+    lo = max(1, top - count * 3 + 1)
+    hi = top + 50
+    a = _alive_ids(channel_id, list(range(lo, hi + 1)))
+    if not a:
+        # top estimate bahut stale tha (posts niche) — 2x aur gairo me dhundo
+        lo2 = max(1, lo - count * 6)
+        a = _alive_ids(channel_id, list(range(lo2, lo)))
+        if not a:
+            return []
+    posts = [a[i] for i in sorted(a)][-count:]
+    note_message_id(channel_id, max(a))
+    for p in posts:
+        p["chat_id"] = int(channel_id)
+    return posts
+
+
 def fetch_group_context(chat_id: int, around_id: int, before: int = 12,
                         after: int = 0) -> list[dict]:
     """Group answer context: around_id se pehle ke `before` messages.

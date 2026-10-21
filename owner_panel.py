@@ -222,7 +222,7 @@ def handle_owner_command(msg) -> bool:
                             f"-{last_sync.get('purged', 0)} deleted verify")
         except Exception:
             pass
-        # v5.0 MAX POWER: naye superpowers ka live snapshot
+        # v5.1 REAL AGENT: tools + radar (group + channel) ka live snapshot
         try:
             import powers as _powers
             import agent_tools as _agent_tools
@@ -230,8 +230,11 @@ def handle_owner_command(msg) -> bool:
             ps = _powers.powers_status()
             ts = _agent_tools.stats()
             radar_ids = getattr(_bot_mod, "_RADAR_LAST", {})
-            radar_line = (f"Radar: 🟢 scanning (last id {max(radar_ids.values()) if radar_ids else '?'})"
+            ch_ids = getattr(_bot_mod, "_CH_RADAR_LAST", {})
+            radar_line = (f"Radar: 🟢 group (last id {max(radar_ids.values()) if radar_ids else '?'})"
                           if radar_ids else "Radar: ⏳ seed wait (pehla message aane par ON)")
+            if ch_ids:
+                radar_line += f" · 📢 channel (last id {max(ch_ids.values())})"
             power_line = (
                 f"{radar_line}\n"
                 f"Watchdog: {'🟢 ON' if getattr(__import__('config'), 'WATCHDOG_ENABLED', 1) else '🔴 OFF'} "
@@ -241,10 +244,12 @@ def handle_owner_command(msg) -> bool:
                 f"Flood-guard: {'ON' if ps.get('flood_guard') else 'OFF'}\n"
                 f"Member cards: {ps.get('member_cards', 0)} profiles · "
                 f"Reminders pending: {ps.get('pending_reminders', 0)}\n"
-                f"AI tool calls: {ts.get('calls', 0)} (SEARCH/USER/RECENT/...)"
+                f"🛠 Live tool calls: {ts.get('auto_calls', 0)} auto · "
+                f"{ts.get('fc_calls', 0)} FC · {ts.get('calls', 0)} manual "
+                f"· {ts.get('rescued', 0)} rescued"
             )
         except Exception:
-            power_line = "v5.0 powers: n/a"
+            power_line = "v5.1 agent powers: n/a"
         _send(
             chat_id,
             f"Runtime status\nStorage: {store}\n"

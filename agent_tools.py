@@ -57,8 +57,116 @@ _LEGACY_LOOKUP_RE = re.compile(r"^\s*LOOKUP\s*:\s*(?P<query>.+)$",
                                re.IGNORECASE | re.MULTILINE)
 
 TOOL_MAX_ROUNDS = max(1, int(getattr(config, "TOOL_MAX_ROUNDS", 3)))
-TOOL_NAMES = ("SEARCH", "GETMSG", "RECENT", "USER", "WHOIS", "PINNED",
-              "FILES", "INFO", "ADMINLOG", "LINKCHECK")
+TOOL_NAMES = ("SEARCH", "GETMSG", "RECENT", "CHANNELRECENT", "USER", "WHOIS",
+              "PINNED", "FILES", "INFO", "ADMINLOG", "LINKCHECK")
+
+# v5.1: Gemini native function-calling ke liye tool specifications
+# (functionDeclarations REST format). Ye TOOL: text-protocol ka NATIVE
+# superset hai — jab text provider Gemini ho, model STRUCTURED function
+# calls karta hai (jaise ChatGPT/OpenAI tools), text protocol sirf
+# Mercury-type providers ke liye fallback rehta hai.
+TOOL_SPECS = [
+    {"name": "searchContent",
+     "description": ("Deep search in the community memory: channel posts, "
+                     "group messages, Q&A history. Use for anything about "
+                     "files, loaders, APKs, keys, links, past events or "
+                     "member conversations that is not already in your context."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "query": {"type": "STRING", "description": "keywords to search for"}},
+         "required": ["query"]}},
+    {"name": "recentChannelPosts",
+     "description": ("Fetch the LATEST posts of the managed channel LIVE "
+                     "from Telegram right now (fresher than any context "
+                     "block). Use for 'latest/new post', 'naya loader/"
+                     "hack/update', or to verify current channel state."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "count": {"type": "INTEGER", "description": "how many latest posts (1-20)"}},
+         "required": ["count"]}},
+    {"name": "recentGroupMessages",
+     "description": ("Fetch the latest messages of the current group chat "
+                     "LIVE from Telegram (privacy-mode proof). Use for "
+                     "'kya chal raha', 'last messages', conversation state."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "count": {"type": "INTEGER", "description": "how many messages (1-30)"}},
+         "required": ["count"]}},
+    {"name": "getMessage",
+     "description": ("Fetch ONE message/post by its numeric Telegram id from "
+                     "the current chat or channel. Deleted messages are "
+                     "reported as DELETED (live truth)."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "messageId": {"type": "INTEGER", "description": "numeric message id, e.g. 1523"}},
+         "required": ["messageId"]}},
+    {"name": "memberProfile",
+     "description": ("Full live profile of a group member by name/@username/"
+                     "id: role, join date, activity, their questions, "
+                     "topics. Use for 'ye kaun hai', 'x ne kya bola'."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "name": {"type": "STRING", "description": "member name, @username or id"}},
+         "required": ["name"]}},
+    {"name": "pinnedMessage",
+     "description": "Get the current pinned message of the chat (live).",
+     "parameters": {"type": "OBJECT", "properties": {}}},
+    {"name": "listChannelFiles",
+     "description": ("List files/documents posted in the managed channel "
+                     "(APKs, loaders, mods), newest first."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "query": {"type": "STRING", "description": "optional filename filter"}}}},
+    {"name": "chatInfo",
+     "description": ("Live facts about the current chat: member count, "
+                     "admin list, linked channel identity."),
+     "parameters": {"type": "OBJECT", "properties": {}}},
+    {"name": "adminLog",
+     "description": ("Recent channel ADMIN ACTIONS from Telegram's admin "
+                     "log: who deleted/edited/pinned which post, bans, "
+                     "invite links, slow mode changes."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "count": {"type": "INTEGER", "description": "how many events (1-20)"}}}},
+    {"name": "checkLink",
+     "description": ("Follow any URL live and report the REAL target/status "
+                     "(shortlink expander: spoo.me, bit.ly...; t.me post "
+                     "links verified against the live channel)."),
+     "parameters": {"type": "OBJECT", "properties": {
+         "url": {"type": "STRING", "description": "the URL to check"}},
+         "required": ["url"]}},
+]
+
+
+def execute_fc(name: str | None, args: dict | None,
+               user_ctx: dict) -> str:
+    """Gemini FC (structured) call -> text tool impl par map karo.
+
+    Hamesha string (kabhi raise nahi). fc stat bump hota hai.
+    """
+    name = (name or "").strip()
+    a = args if isinstance(args, dict) else {}
+    try:
+        if name == "searchContent":
+            return _tool_search(str(a.get("query") or ""), user_ctx)
+        if name == "recentChannelPosts":
+            n = a.get("count")
+            return _tool_channel_recent(str(n) if n is not None else "", user_ctx)
+        if name == "recentGroupMessages":
+            n = a.get("count")
+            return _tool_recent(str(n) if n is not None else "", user_ctx)
+        if name == "getMessage":
+            return _tool_getmsg(str(a.get("messageId") or ""), user_ctx)
+        if name == "memberProfile":
+            return _tool_user(str(a.get("name") or ""), user_ctx)
+        if name == "pinnedMessage":
+            return _tool_pinned("", user_ctx)
+        if name == "listChannelFiles":
+            return _tool_files(str(a.get("query") or ""), user_ctx)
+        if name == "chatInfo":
+            return _tool_info("", user_ctx)
+        if name == "adminLog":
+            n = a.get("count")
+            return _tool_adminlog(str(n) if n is not None else "", user_ctx)
+        if name == "checkLink":
+            return _tool_linkcheck(str(a.get("url") or ""), user_ctx)
+    except Exception as exc:  # noqa: BLE001
+        return f"TOOL_ERROR: {name} failed ({exc!r})"
+    return (f"TOOL_ERROR: unknown tool {name}. Valid: "
+            + ", ".join(s["name"] for s in TOOL_SPECS))
 
 
 def parse_tool_request(text: str | None) -> tuple[str, str] | None:
@@ -154,6 +262,40 @@ def _tool_getmsg(args: str, user_ctx: dict) -> str:
         media = p.get("file_name") or p.get("file_type") or ""
         body = txt if txt else f"(media message: {media})" if media else "(no text)"
         return f"message #{mid} by {author} at {when} UTC: {body[:600]}"
+    except Exception as exc:  # noqa: BLE001
+        return f"TOOL_ERROR: {exc!r}"
+
+
+def _tool_channel_recent(args: str, user_ctx: dict) -> str:
+    """v5.1: managed CHANNEL ke LATEST posts — LIVE MTProto fetch.
+
+    Ye owner ke 'channel ka updated message nahi dikh raha' bug ka seedha
+    fix hai: stale Mongo context ki jagah answer-time par FRESH posts.
+    """
+    cid = links.get_channel_id()
+    if not cid:
+        return "TOOL_ERROR: no managed channel linked."
+    try:
+        import mtproto_layer
+        if not mtproto_layer.is_connected():
+            return "TOOL_ERROR: realtime layer not connected right now."
+        m = re.search(r"\d{1,2}", args or "")
+        n = min(max(int(m.group(0)), 1), 20) if m else 8
+        posts = mtproto_layer.recent_channel_posts(cid, count=n)
+        if not posts:
+            return "(no live posts found in the channel)"
+        out = []
+        for i, p in enumerate(posts):
+            when = time.strftime("%d %b %H:%M", time.gmtime(p.get("date") or 0)) \
+                if p.get("date") else "?"
+            txt = (p.get("text") or "").strip()
+            media = p.get("file_name") or p.get("file_type") or ""
+            body = txt if txt else (f"(media: {media})" if media else "(no text)")
+            tag = "  ← LATEST POST" if i == len(posts) - 1 else ""
+            out.append(f"post #{p['id']} [{when} UTC]{tag}: {body[:220]}")
+        return ("LATEST channel posts (newest last, fetched LIVE seconds ago "
+                "— this is the channel's CURRENT true state):\n"
+                + "\n".join(out))
     except Exception as exc:  # noqa: BLE001
         return f"TOOL_ERROR: {exc!r}"
 
@@ -438,6 +580,7 @@ _TOOLS = {
     "SEARCH": _tool_search,
     "GETMSG": _tool_getmsg,
     "RECENT": _tool_recent,
+    "CHANNELRECENT": _tool_channel_recent,
     "USER": _tool_user,
     "PINNED": _tool_pinned,
     "FILES": _tool_files,
@@ -462,7 +605,9 @@ def execute(name: str, args: str, user_ctx: dict) -> str:
 # tool-loop driver — agent.answer isse use karta hai
 # ---------------------------------------------------------------------------
 
-TOOL_STATS: dict[str, int] = {"calls": 0, "rounds": 0}
+TOOL_STATS: dict[str, int] = {"calls": 0, "rounds": 0, "fc_calls": 0,
+                              "auto_calls": 0, "auto_fired": 0,
+                              "rescued": 0}
 
 
 def run_tool_loop(question: str, first_text: str, user_ctx: dict,
@@ -520,7 +665,179 @@ def run_tool_loop(question: str, first_text: str, user_ctx: dict,
     return text or None, interim
 
 
+# ---------------------------------------------------------------------------
+# v5.1 AUTO-TOOLS: deterministic live prefetch (model-compliance-free)
+#
+# PROBLEM (owner live-report): production me tools: {'calls': 0} — model
+# kabhi khud TOOL: line nahi likhta, isliye 100% answers stale memory se
+# bante the. FIX: sawal ka INTENT hi deterministic detect karke system
+# khud LIVE tools chala deta hai jawab se PEHLE — chahe model kuch na
+# bole. Fresh data prompt ke TOP par 'LIVE TOOL RESULTS' block me jaata
+# hai, jo purane context blocks ko override karta hai.
+# ---------------------------------------------------------------------------
+
+_RE_CHANNEL_LATEST = re.compile(
+    r"\b(latest|last|new|newest|recent)\s*(wala|wali|wale)?\s*"
+    r"(post|posts|loader|hack|mod|update|version|file|apn?k?)\b"
+    r"|\b(naya|nayi|naye|navi)\s+(post|loader|hack|mod|update|version|"
+    r"file|apn?k|key|panel|config)\b"
+    r"|\bchannel\s+(me|main|mein|pe|par)\b.*\b(kya|naya|nayi|naye|new|latest)\b"
+    r"|\bkya\s+(naya|nayi|new|latest)\b"
+    r"|\b(channel|post)\s+(update|updated)\b"
+    r"|\babhi\s+(ka|wala|wali)?\s*(post|loader|hack|update|version)\b"
+    r"|\bkuch\s+(naya|new)\s*(aaya|aya|dala)\b",
+    re.IGNORECASE)
+
+# admin-action intent: 'kisne <filler 0-4> delete/edit/pin...' ya
+# '<action> ... kisne kiya' — filler words allow karte hain ('kisne wo
+# post delete kiya'), false-positives (kisne banaya) nahi.
+_RE_KISNE = re.compile(r"\bkisne\b", re.IGNORECASE)
+_RE_ADMIN_STEM = re.compile(
+    r"\b(delet\w*|edit\w*|pin+ed\b|pin\s+kiya|pin\s+kia|uda\b|"
+    r"hata\s?\w*|unban\w*|kick\w*|ban\b(?!aya|aye|ayi|ega|egi)|"
+    r"remove\w*|change\w*)", re.IGNORECASE)
+
+
+def _admin_act_intent(q: str) -> bool:
+    m = _RE_KISNE.search(q or "")
+    if not m:
+        return bool(re.search(r"\badmin\s+(log|action|kaam)\b", q or "",
+                              re.IGNORECASE))
+    tail = q[m.end():m.end() + 40]
+    if _RE_ADMIN_STEM.search(tail):
+        return True
+    head = q[max(0, m.start() - 40):m.start()]
+    return bool(_RE_ADMIN_STEM.search(head))
+
+_RE_PINNED = re.compile(r"\bpinned?\b|\bpin\s+(message|kiya|kia|post)\b",
+                        re.IGNORECASE)
+
+_RE_CHAT_FACTS = re.compile(
+    r"\b(kitne|kinta|kinti|total)\s+(member|members|log|admim?n|admins|member count)\b"
+    r"|\bmembers?\s+(kitne|count|total)\b"
+    r"|\b(group|chat|channel)\s+(info|details|facts)\b",
+    re.IGNORECASE)
+
+_RE_WHOIS = re.compile(
+    r"\b(kaun|kon|koun|who)\s+(hai|h|he|is|thi|tha|hu|hoo)\b"
+    r"|\b(kaun|kon|koun)\s+(\w{3,20})\s*(hai|he)?\b"
+    r"|\bwho\s+is\s+(\w{3,20})\b",
+    re.IGNORECASE)
+
+_RE_MSG_ID = re.compile(
+    r"#(\d{1,6})\b"
+    r"|\bmessage\s*(?:no\.?|id|#|number)?\s*[:#]?\s*(\d{1,6})\b"
+    r"|t\.me/(?:c/\d+|[\w.]+)/(\d{1,6})",
+    re.IGNORECASE)
+
+_RE_RECENT_CHAT = re.compile(
+    r"\bkya\s+(chal\s+raha|chalu\s+hai|ho\s+raha|hua)\b"
+    r"|\blast\s+(messages?|chat|baat)\b"
+    r"|\brecent\s+(messages?|chat|baat)\b"
+    r"|\babhi\s+(kya|hua)\b"
+    r"|\bkya\s+baat\s+ho\s+rahi\b",
+    re.IGNORECASE)
+
+_RE_CONTENT_REFRESH = re.compile(
+    r"\b(loader|hack|mod|mods|apn?k|key|file|files|panel|config|version|"
+    r"update|link|bihi|patch)\b",
+    re.IGNORECASE)
+
+_URL_IN_Q = re.compile(r"https?://\S+", re.IGNORECASE)
+
+_NAME_STOP = {"group", "chat", "channel", "bot", "mera", "tum", "kya", "post",
+              "hai", "he", "hu", "hoo", "ye", "wo", "yeh", "woh", "kaun",
+              "kon", "koun", "who", "bhai", "boss", "owner", "admin"}
+
+
+def _whois_token(question: str) -> str | None:
+    m = re.search(r"@\s*([A-Za-z0-9_]{3,32})", question or "")
+    if m:
+        return m.group(1)
+    for pat in (
+        # 'NAME (NAME NAME) kaun hai' — naam se PEHLE
+        r"\b([A-Za-z_][\w.]{2,31}(?:\s+[A-Za-z_][\w.]{2,31}){0,2})\s+"
+        r"(?:kaun|kon|koun|who)\b",
+        # 'kaun hai NAME' / 'who is NAME' — naam se BAAD
+        r"\b(?:kaun|kon|koun|who\s+is|who's)\s+(?:hai|he)?\s*"
+        r"([A-Za-z_][\w.]{2,31})\b",
+    ):
+        m = re.search(pat, question or "", re.IGNORECASE)
+        if m:
+            tok = m.group(1).strip()
+            if tok.lower() not in _NAME_STOP:
+                return tok[:40]
+    return None
+
+
+def auto_tools(question: str, user_ctx: dict) -> tuple[str, list[str]]:
+    """Sawal ke intent se deterministic LIVE tools chalao, results block banao.
+
+    Return (block, fired_tool_names). block == "" => kuch nahi chala.
+    Har tool non-fatal; sirf matched intents chalte hain (latency-safe:
+    0-2 MTProto calls typical, ~0.5s max).
+    """
+    q = question or ""
+    if not q.strip() or not int(getattr(config, "AUTO_TOOLS_ENABLED", 1)):
+        return "", []
+    fired: list[str] = []
+    out: list[str] = []
+    now = time.time()
+
+    def _run(label: str, tool: str, args: str) -> None:
+        res = execute(tool, args, user_ctx)
+        stat_bump("auto_calls")
+        if not res.startswith("TOOL_ERROR:"):
+            fired.append(label)
+            out.append(f"[{label}]\n{res}")
+
+    if _RE_CHANNEL_LATEST.search(q):
+        _run("recentChannelPosts", "CHANNELRECENT", "8")
+    if _admin_act_intent(q):
+        _run("adminLog", "ADMINLOG", "12")
+    if _RE_PINNED.search(q):
+        _run("pinnedMessage", "PINNED", "")
+    if _RE_CHAT_FACTS.search(q):
+        _run("chatInfo", "INFO", "")
+    if _RE_RECENT_CHAT.search(q):
+        _run("recentGroupMessages", "RECENT", "15")
+    m = _RE_MSG_ID.search(q)
+    if m:
+        mid = next((g for g in m.groups() if g), None)
+        if mid:
+            _run("getMessage", "GETMSG", mid)
+    tok = _whois_token(q)
+    if tok:
+        _run("memberProfile", "USER", tok)
+    um = _URL_IN_Q.search(q)
+    if um:
+        _run("checkLink", "LINKCHECK", um.group(0))
+    # freshness aid: community-content question + channel fresh nahi hai
+    # (koi aur channel tool nahi chala) => latest posts dedo (stale-kill)
+    if (_RE_CONTENT_REFRESH.search(q) and "recentChannelPosts" not in fired
+            and links.get_channel_id()):
+        _run("recentChannelPosts", "CHANNELRECENT", "5")
+
+    if not out:
+        return "", []
+    stat_bump("auto_fired")
+    block = (
+        f"LIVE TOOL RESULTS (system ne ye tools ABHI khud chalaye hain — "
+        f"{int(time.time() - now)}s pehle, seedha Telegram/Mongo se. "
+        "FRESH live data hai — purane context blocks se CONFLICT ho to "
+        "HAMESHA isko sahi maano. Jo isi block me nahi hai aur purane "
+        "context me hai, use 'purana record' keh ke batao):\n\n"
+        + "\n\n".join(out)[:7000]
+    )
+    return block, fired
+
+
 _STAT_LOCK = __import__("threading").Lock()
+
+
+def stat_bump(kind: str) -> None:
+    with _STAT_LOCK:
+        TOOL_STATS[kind] = TOOL_STATS.get(kind, 0) + 1
 
 
 def stats() -> dict:

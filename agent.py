@@ -52,15 +52,34 @@ _CAPABILITIES = (
     "memory se turant gayab ho jate hain, aur har channel link jo tum "
     "mention karo live verify hota hai. Purane/context blocks vs LIVE "
     "block me conflict ho to LIVE block ko authoritative maano. "
-    "v5.0 REAL TOOLS (sab LIVE data chalate hain): TOOL: SEARCH <query> "
-    "(deep memory search), TOOL: GETMSG <id> (koi bhi message Telegram "
-    "se by id — deleted ka sach bhi), TOOL: RECENT <n> (live recent "
-    "chat), TOOL: USER <naam> (member ka poora profile: role, join "
-    "date, activity, unke sawal-jawab), TOOL: PINNED (pinned message), "
-    "TOOL: FILES <query> (channel files listing), TOOL: INFO (live "
-    "members/admins/channel facts), TOOL: ADMINLOG <n> (channel me "
-    "kisne kya delete/edit kiya — admin log), TOOL: LINKCHECK <url> "
-    "(kisi bhi link ka real target/status). "
+    "v5.1 AGENT TOOLS — TUMHARA SABSE BADA POWER (pehle use karo, "
+    "phir jawab do): tumhare paas LIVE tools hain jo SYSTEM turant "
+    "chalata hai — TOOL: <NAME> <args> likho aur SYSTEM us tool ka "
+    "REAL result wapas laakar deta hai. "
+    "WHEN TO USE (in situations me hamesha): "
+    "'latest/naya post|loader|hack|update kya aaya' -> TOOL: CHANNELRECENT 8 "
+    "(channel ka LIVE latest posts); "
+    "'kisne delete/edit/pin kiya' -> TOOL: ADMINLOG 12; "
+    "'X kaun hai / X ne kya bola' (member) -> TOOL: USER <naam>; "
+    "'pinned me kya hai' -> TOOL: PINNED; "
+    "'kitne members/admins hain' -> TOOL: INFO; "
+    "koi message id (#123 / message 123) -> TOOL: GETMSG <id>; "
+    "'kya chal raha hai / last messages' -> TOOL: RECENT 15; "
+    "koi bhi link ka status/target -> TOOL: LINKCHECK <url>; "
+    "files/loaders/keys/past baatein jo context me NAHI dikhi -> TOOL: "
+    "SEARCH <keywords>. "
+    "EXAMPLES (question -> tumhara exactly-ek-line reply): "
+    "'channel pe naya kya aaya?' -> TOOL: CHANNELRECENT 8 | "
+    "'rich kaun hai ye?' -> TOOL: USER rich | "
+    "'240 number wala post kya tha?' -> TOOL: GETMSG 240 | "
+    "'kisne wo post delete kiya?' -> TOOL: ADMINLOG 12. "
+    "RULE: LIVE cheez (latest, abhi ka, kisne kiya, kaun hai, pinned, "
+    "count) poochhi gayi aur tumhare context blocks me uski pakki "
+    "LIVE detail nahi hai -> TOOL: call karo, guess mat karo. LIVE "
+    "TOOL RESULTS block (agar prompt me hai) wo data hai jo system ne "
+    "abhi khud chalaya hai — usko context blocks se zyada authoritative "
+    "mano. Ek question me max 3 tool calls. Chhote greetings/general "
+    "sawalo me tool ki zarurat nahi. "
     "Group manager powers jo tum sach me chalate ho (mention karo to "
     "honestly batao): naye members ka swagat, flood-guard auto-mute, "
     "invite links (/invite), polls (/poll), reminders (/remind '30m "
@@ -84,6 +103,10 @@ SYSTEM_PROMPT = (
     "member 'boss' — that word is reserved for the OWNER alone. No sarcasm, "
     "no mocking, no over-familiar slang. Warm and friendly — but polished. "
     "Below is context learned from the channel + group. "
+    "FRESHNESS HIERARCHY (v5.1): LIVE TOOL RESULTS block (agar prompt me "
+    "hai) > LIVE GROUP CHAT block > baaki context (learned memory, "
+    "jo kuch-der-purana ho sakta hai). Conflict me FRESH wale ko sahi "
+    "maano. "
     "GROUNDING (CRITICAL — never violate): the context below is the "
     "SINGLE SOURCE OF TRUTH about this community. For ANYTHING about "
     "files, apps, loaders, APKs, keys, links, panels, configs, channel "
@@ -202,11 +225,14 @@ SYSTEM_PROMPT = (
     "You may reply with MULTIPLE messages when natural (e.g. an "
     "acknowledgement first, then details): separate messages with a line "
     "containing only <SPLIT>. "
-    "If the user asks something you should verify first (e.g. 'new loader "
-    "konsa aaya', 'kisne delete kiya', 'ye member kaun hai', 'pinned me "
-    "kya hai') and the context above is not enough, do NOT guess — reply "
-    "with exactly one line: TOOL: <NAME> <args> (e.g. TOOL: SEARCH naya "
-    "loader, TOOL: USER rich, TOOL: GETMSG 1523, TOOL: ADMINLOG 10). "
+    "If the user asks something about LIVE/current state — latest post, "
+    "naya loader/hack/update, kisne delete/edit kiya, koi member kaun hai, "
+    "pinned me kya hai, kitne members hain, kya chal raha hai — and the "
+    "prompt does NOT already contain a fresh LIVE TOOL RESULTS block for "
+    "it, do NOT guess and do NOT rely on old context: reply with exactly "
+    "one line: TOOL: <NAME> <args> (e.g. TOOL: CHANNELRECENT 8, TOOL: "
+    "SEARCH naya loader, TOOL: USER rich, TOOL: GETMSG 1523, TOOL: "
+    "ADMINLOG 12, TOOL: RECENT 15). "
     "The system runs the REAL tool instantly and asks you again with "
     "fresh LIVE results; then answer. Max 3 tool calls per question; for "
     "simple questions answer directly without tools. Never invent what "
@@ -707,6 +733,123 @@ def _run_tools(question: str, first_text: str | None, user_ctx: dict,
         return first_text, None
 
 
+# v5.1 REAL AGENT: Gemini native function-calling loop =======================
+
+
+def _fc_agent_loop(prompt: str, system: str, user_ctx: dict) -> str:
+    """Native Gemini FC loop — model STRUCTURED functionCall karta hai,
+    system tool chalaakar functionResponse feed karta hai (max rounds
+    ke andar), phir final text. Ye text-protocol se kahin zyada
+    reliable hai (production me text-protocol 0 calls kar raha tha).
+    """
+    contents = [{"role": "user", "parts": [{"text": prompt}]}]
+    rounds = 0
+    max_rounds = max(1, int(getattr(config, "TOOL_MAX_ROUNDS", 3)))
+    router = ai_engine.get_router()
+    tools = agent_tools.TOOL_SPECS
+    while rounds < max_rounds:
+        res = router.generate_fc(
+            contents, system=system, tools=tools,
+            max_tokens=config.ANSWER_MAX_TOKENS + 200)
+        calls = res.get("calls")
+        if calls:
+            contents.append({"role": "model", "parts": [
+                {"functionCall": c} for c in calls]})
+            agent_tools.stat_bump("fc_calls")
+            resp_parts = []
+            for c in calls:
+                out = agent_tools.execute_fc(
+                    c.get("name"), c.get("args") or {}, user_ctx)
+                resp_parts.append({"functionResponse": {
+                    "name": c.get("name"),
+                    "response": {"result": str(out)[:9000]}}})
+            contents.append({"role": ai_engine.fc_resp_role(),
+                              "parts": resp_parts})
+            rounds += 1
+            continue
+        return res.get("text") or ""
+    # rounds khatam — ab tools hata ke seedha final answer lo
+    res = router.generate_fc(contents, system=system, tools=None,
+                             max_tokens=config.ANSWER_MAX_TOKENS)
+    return res.get("text") or ""
+
+
+def _use_fc_path(user_ctx: dict) -> bool:
+    """Gemini selected + text-only + FC enabled + specs ready?"""
+    try:
+        if not int(getattr(config, "AGENT_FC_ENABLED", 1)):
+            return False
+        if user_ctx.get("media"):
+            return False  # media -> generate_mm path (vision provider)
+        sel_prov, _model = ai_engine.get_router().get_text_selection()
+        return sel_prov == "gemini" and bool(agent_tools.TOOL_SPECS)
+    except Exception:
+        return False
+
+
+# v5.1 RESCUE PASS: model 'record nahi' bol raha hai jabki live tools
+# check kar sakte the — system khud tools chala ke jawab REGENERATE
+# karta hai. Mercury-jaise non-FC providers ke liye safety net.
+
+_RESCUE_NO_RECORD_RE = re.compile(
+    r"(?:record|jaankari|jankari|info|information|data|detail)[^\n]{0,25}"
+    r"(?:nahi|nah|nhi|na hi)\b"
+    r"|\bkoi\s+record\s+nahi\b|\bmera\s+record\s+nahi\b"
+    r"|\bpata\s+(?:nahi|nhi)\b|\bmila\s+nahi\b|\bnahi\s+mila\b"
+    r"|\bkuch\s+nahi\s+mila\b"
+    r"|\bno\s+record\b|\bno\s+data\b|\bdon'?t\s+have\b|\bdo\s+not\s+have\b"
+    r"|\bi\s+don'?t\s+know\b|\bnot\s+available\s+right\s+now\b",
+    re.IGNORECASE)
+
+
+def _rescue_needed(question: str, text: str | None) -> bool:
+    if not int(getattr(config, "TOOL_RESCUE_ENABLED", 1)):
+        return False
+    if not text or not _RESCUE_NO_RECORD_RE.search(text):
+        return False
+    # sirf community-content questions — general knowledge pe nahi
+    if not agent_tools._RE_CONTENT_REFRESH.search(question or ""):
+        return False
+    return True
+
+
+def _rescue_regen(question: str, draft: str, user_ctx: dict,
+                  system: str) -> str | None:
+    """LIVE tools chala ke draft ko fresh data ke saath regen karo."""
+    agent_tools.stat_bump("rescued")
+    results: list[str] = []
+    q = (question or "").strip()
+    try:
+        srch = agent_tools.execute("SEARCH", q[:150], user_ctx)
+        if (not srch.startswith("TOOL_ERROR:")
+                and "(no records matched" not in srch):
+            results.append("[searchContent]\n" + srch)
+    except Exception:
+        pass
+    try:
+        chan = agent_tools.execute("CHANNELRECENT", "6", user_ctx)
+        if not chan.startswith("TOOL_ERROR:"):
+            results.append("[recentChannelPosts]\n" + chan)
+    except Exception:
+        pass
+    if not results:
+        return None
+    rp = (
+        f"User ka sawal: {q}\n\n"
+        f"Tumhara pehla draft (jo 'record nahi' keh raha tha):\n{draft}\n\n"
+        "SYSTEM ne LIVE tools khud chalaye — ye REAL fresh results hain:\n\n"
+        + "\n\n".join(results)[:6000]
+        + "\n\nAb FINAL jawab do — user ki language me, concise, apne "
+        "shabdon me. In live results se jo mila wahi bolo; jo nahi mila "
+        "usko honestly bolo. Fake progress phrases bilkul nahi."
+    )
+    try:
+        out = _generate_answer(rp, system, user_ctx)
+        return out if (out or "").strip() else None
+    except Exception:
+        return None
+
+
 _RULE_LINE_RE = re.compile(r"^RULE:\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -1162,14 +1305,23 @@ def answer(question: str, user_ctx: dict) -> dict:
             "sawal ka factual jawab do, aur politely bolo ki rules sirf "
             "group ke owner/admins set karte hain.\n\n"
         )
+    # v5.1 AUTO-TOOLS: sawal ke intent se deterministic LIVE tools —
+    # fresh data prompt ke TOP par (model-compliance-free; production
+    # me text-protocol ka 0-call problem isi se solve hota hai).
+    auto_block = ""
+    try:
+        auto_block, _auto_fired = agent_tools.auto_tools(question, user_ctx)
+    except Exception:
+        auto_block = ""
     if hits and ctx_block:
         prompt = (
-            (standing + "\n\n" if standing else "")
+            (auto_block + "\n\n" if auto_block else "")
+            + (standing + "\n\n" if standing else "")
             + (f"{facts_block}\n\n" if facts_block else "")
             + (f"{log_block}\n\n" if log_block else "")
             + (f"{card_block}\n\n" if card_block else "")
             + live_block
-            + f"Context (learned from channel + group):\n{ctx_block}\n\n"
+            + f"Context (learned from channel + group, kuch der purana ho sakta hai):\n{ctx_block}\n\n"
             + (f"Who-info:\n{who_block}\n\n" if who_block else "")
             + file_fact
             + member_fact
@@ -1177,9 +1329,28 @@ def answer(question: str, user_ctx: dict) -> dict:
             "Answer:"
         )
         try:
-            text = _generate_answer(prompt, SYSTEM_PROMPT, user_ctx)
-            text, interim = _run_tools(question, text, user_ctx,
-                                        SYSTEM_PROMPT)
+            interim = None
+            if _use_fc_path(user_ctx):
+                # v5.1: Gemini native function-calling agent loop
+                try:
+                    text = _fc_agent_loop(prompt, SYSTEM_PROMPT, user_ctx)
+                except ai_engine.NoProvidersError:
+                    raise
+                except Exception:
+                    text = _generate_answer(prompt, SYSTEM_PROMPT, user_ctx)
+                    text, interim = _run_tools(question, text, user_ctx,
+                                                SYSTEM_PROMPT)
+            else:
+                text = _generate_answer(prompt, SYSTEM_PROMPT, user_ctx)
+                text, interim = _run_tools(question, text, user_ctx,
+                                            SYSTEM_PROMPT)
+                # v5.1 rescue: 'record nahi' bola jabki live check ho sakta
+                # tha -> system khud tools chala ke regen karta hai
+                if _rescue_needed(question, text):
+                    regen = _rescue_regen(question, text, user_ctx,
+                                          SYSTEM_PROMPT)
+                    if regen:
+                        text = regen
             text, _ = _extract_rule(text, user_ctx, question)
             text = sanitize_claims(text)
             # v3.3: fabricated post links (#245 instead of #197) are
@@ -1247,7 +1418,8 @@ def answer(question: str, user_ctx: dict) -> dict:
         who_block = _role_context(user_ctx)
         log_block = _recent_log_block(user_ctx)
         qprompt = (
-            (standing + "\n\n" if standing else "")
+            (auto_block + "\n\n" if auto_block else "")
+            + (standing + "\n\n" if standing else "")
             + (f"{facts_block}\n\n" if facts_block else "")
             + (f"{log_block}\n\n" if log_block else "")
             + (f"{card_block}\n\n" if card_block else "")
@@ -1257,8 +1429,24 @@ def answer(question: str, user_ctx: dict) -> dict:
             + member_fact
             + f"User ({user_ctx.get('username') or 'user'}): {question}\nAnswer concisely:"
         )
-        text = _generate_answer(qprompt, GENERAL_PROMPT, user_ctx)
-        text, interim = _run_tools(question, text, user_ctx, GENERAL_PROMPT)
+        interim = None
+        if _use_fc_path(user_ctx):
+            try:
+                text = _fc_agent_loop(qprompt, SYSTEM_PROMPT, user_ctx)
+            except ai_engine.NoProvidersError:
+                raise
+            except Exception:
+                text = _generate_answer(qprompt, GENERAL_PROMPT, user_ctx)
+                text, interim = _run_tools(question, text, user_ctx,
+                                            GENERAL_PROMPT)
+        else:
+            text = _generate_answer(qprompt, GENERAL_PROMPT, user_ctx)
+            text, interim = _run_tools(question, text, user_ctx, GENERAL_PROMPT)
+            if _rescue_needed(question, text):
+                regen = _rescue_regen(question, text, user_ctx,
+                                      GENERAL_PROMPT)
+                if regen:
+                    text = regen
         text, _ = _extract_rule(text, user_ctx, question)
         text = sanitize_claims(text)
         # v4.0 TRUTH LAYER + unrequested-key guard — general path par bhi

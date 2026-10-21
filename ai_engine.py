@@ -224,6 +224,107 @@ def _gemini_call_mm(key: str, model: str, prompt: str, system: str | None,
     return text, err
 
 
+# ---------------------------------------------------------------------------
+# v5.1 REAL AGENT: native Gemini function calling (FC)
+#
+# v5.0 tak model ko 'TOOL: SEARCH ...' text-protocol likhne ki ummid thi —
+# production me tools: {'calls': 0} (model kabhi nahi likhta). Ab Gemini
+# selected hone par NATIVE functionDeclarations jate hain aur model
+# STRUCTURED functionCall karta hai — reliable tool use, jaise OpenAI
+# tools. Mercury/diffusion providers text-protocol + auto-tools path
+# use karte hain.
+# ---------------------------------------------------------------------------
+
+# REST wire format me functionResponse content ka role — 'user' widely
+# accepted hota hai; kuch endpoints/SDK 'function' chahte hain. Self-
+# healing: 400 + 'role' error par doosra format try hota hai (process
+# lifetime ke liye yaad rakha jata hai).
+_FC_RESP_ROLE = "user"
+
+
+def fc_resp_role() -> str:
+    return _FC_RESP_ROLE
+
+
+def _extract_gemini_parts(payload: dict) -> tuple[list[dict], list[dict]]:
+    """-> (text_parts, function_calls). function_calls: [{name, args}]."""
+    texts: list[dict] = []
+    calls: list[dict] = []
+    cands = payload.get("candidates") or []
+    if not cands:
+        return texts, calls
+    content = cands[0].get("content") or {}
+    for part in content.get("parts") or []:
+        if part.get("text"):
+            texts.append(part)
+        fc = part.get("functionCall")
+        if isinstance(fc, dict) and fc.get("name"):
+            calls.append({"name": fc.get("name"), "args": fc.get("args") or {}})
+    return texts, calls
+
+
+def _gemini_fc_call(key: str, model: str, system: str | None,
+                    contents: list[dict], tools: list[dict] | None,
+                    max_tokens: int, timeout: int) -> tuple[dict, str]:
+    """Native function-calling generateContent.
+
+    Return (result, error): result = {"text": str} ya {"calls": [...]}.
+    Empty result + error = failure (caller failover karta hai).
+    """
+    global _FC_RESP_ROLE
+    body: dict = {
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7},
+    }
+    if system and str(system).strip():
+        body["systemInstruction"] = {"parts": [{"text": str(system).strip()}]}
+    if tools:
+        body["tools"] = [{"functionDeclarations": tools}]
+    if _THINKING_OFF_OK:
+        body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
+
+    def _rewrite_role(cc: list[dict]) -> list[dict]:
+        out = []
+        for c in cc:
+            c2 = dict(c)
+            for p in c2.get("parts") or []:
+                if "functionResponse" in p:
+                    c2["role"] = _FC_RESP_ROLE
+            out.append(c2)
+        return out
+
+    url = f"{GEMINI_BASE}/{model}:generateContent?key={key}"
+    status, payload, err = _post_json(url, body, {"Content-Type": "application/json"},
+                                      timeout)
+    # role-format self-healing: 400 + role complaint -> flip + retry once
+    if err and status == 400 and "role" in (err or "").lower():
+        _FC_RESP_ROLE = "function" if _FC_RESP_ROLE == "user" else "user"
+        body["contents"] = _rewrite_role(contents)
+        status, payload, err = _post_json(url, body,
+                                         {"Content-Type": "application/json"},
+                                         timeout)
+    elif status == 400 and not err:
+        msg = (payload.get("error") or {}).get("message") or ""
+        if "role" in msg.lower():
+            _FC_RESP_ROLE = "function" if _FC_RESP_ROLE == "user" else "user"
+            body["contents"] = _rewrite_role(contents)
+            status, payload, err = _post_json(
+                url, body, {"Content-Type": "application/json"}, timeout)
+        else:
+            return {}, (payload.get("error") or {}).get("message") or "http 400"
+    if err:
+        return {}, err
+    if status >= 400:
+        msg = (payload.get("error") or {}).get("message") or f"http {status}"
+        return {}, msg
+    texts, calls = _extract_gemini_parts(payload)
+    if calls:
+        return {"calls": calls}, ""
+    if texts:
+        return {"text": "".join(t.get("text") or "" for t in texts)}, ""
+    return {}, "empty response"
+
+
 def _openai_chat_call(base: str, key: str, model: str, prompt: str,
                       system: str | None, max_tokens: int, timeout: int) -> tuple[str, str]:
     """Shared openai-compatible chat.completions call (deepseek / mercury)."""
@@ -537,6 +638,37 @@ class AIRouter:
                 prov.pool.report_dead(key)
                 last_err = f"{prov.name}: {err}"
         raise RuntimeError(f"all AI providers failed: {last_err}")
+
+    def generate_fc(self, contents: list[dict], system: str | None = None,
+                    tools: list[dict] | None = None,
+                    max_tokens: int = 500,
+                    timeout: int | None = None) -> dict:
+        """v5.1: native Gemini function-calling turn (with key failover).
+
+        contents = Gemini multi-turn format (user/model/function parts).
+        Return: {"text": str} ya {"calls": [{"name","args"}, ...]}.
+        NoProvidersError -> koi gemini key nahi; RuntimeError -> sab fail.
+        """
+        gemini = self.prov("gemini")
+        if not gemini or not gemini.pool.keys:
+            raise NoProvidersError("no gemini provider for function calling")
+        if timeout is None:
+            timeout = config.AI_REQUEST_TIMEOUT
+        model = get_text_model("gemini") or config.DEFAULT_MODEL
+        last_err = "no keys"
+        attempts = max(1, len(gemini.pool.keys))
+        for _ in range(attempts):
+            key = gemini.pool.choose()
+            if not key:
+                break
+            result, err = _gemini_fc_call(key, model, system, contents, tools,
+                                          max_tokens, timeout)
+            if not err:
+                gemini.pool.report_ok(key)
+                return result
+            gemini.pool.report_dead(key)
+            last_err = err
+        raise RuntimeError(f"gemini fc failed: {last_err}")
 
     def generate_mm(self, prompt: str, media: list[dict],
                     system: str | None = None, max_tokens: int = 1024,

@@ -160,3 +160,20 @@ FLOOD_MUTE_MINUTES = _int("FLOOD_MUTE_MINUTES", 10)
 # TOOL LOOP: ek sawal pe max kitne TOOL: rounds (SEARCH/GETMSG/RECENT/
 # USER/PINNED/FILES/INFO/ADMINLOG/LINKCHECK).
 TOOL_MAX_ROUNDS = max(1, _int("TOOL_MAX_ROUNDS", 3))
+# --- v5.1 REAL AGENT knobs ---
+# AGENT_FC: Gemini selected hone par native function-calling agent loop
+# (structured tool calls — text-protocol se kahin reliable).
+AGENT_FC_ENABLED = _int("AGENT_FC_ENABLED", 1)
+# AUTO-TOOLS: sawal ke intent se deterministic live tools (model ke
+# bole bagair system khud chalata hai — 'bot tools use nahi karta'
+# bug ka main fix).
+AUTO_TOOLS_ENABLED = _int("AUTO_TOOLS_ENABLED", 1)
+# RESCUE: non-FC provider 'record nahi' bole to live tools chala ke
+# jawab regenerate (Mercury safety net).
+TOOL_RESCUE_ENABLED = _int("TOOL_RESCUE_ENABLED", 1)
+# CHANNEL RADAR: managed channel ke naye posts ab group jaisi fast
+# 5s radar me hi scan hote hain (15-min backfill ki jagah) — channel
+# memory hamesha fresh ('channel ka updated message nahi dikhata' fix).
+CHANNEL_RADAR_ENABLED = _int("CHANNEL_RADAR_ENABLED", 1)
+CHANNEL_SYNC_EVERY = max(1, _int("CHANNEL_SYNC_EVERY", 12))  # cycles between deletion syncs
+CHANNEL_SYNC_BATCH = _int("CHANNEL_SYNC_BATCH", 40)         # stored posts per sync
