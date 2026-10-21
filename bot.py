@@ -555,10 +555,14 @@ def _handle_rule_command(msg: dict, uid: int, chat_id: int, text: str) -> bool:
     arg = parts[1].strip() if len(parts) > 1 else ""
     is_owner = uid == config.OWNER_CHAT_ID
     is_admin = is_owner or (config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID)
+    # v4.1 multi-admin: group ka live creator/administrator bhi rules
+    # set/remove kar sakta hai (sirf hardcoded owner id ka bug fix).
+    is_group_admin = (chat_id < 0 and _group_role(chat_id, uid)
+                      in ("owner", "administrator"))
 
     if cmd == "/yaad":
-        if not is_owner:
-            tg_api.send_message(chat_id, "Ye sirf owner kar sakta hai.")
+        if not (is_owner or is_group_admin):
+            tg_api.send_message(chat_id, "Ye sirf owner/admin kar sakta hai.")
             return True
         if not arg:
             tg_api.send_message(chat_id, "Usage: /yaad <hamesha yaad rakhne wali baat>")
@@ -587,8 +591,8 @@ def _handle_rule_command(msg: dict, uid: int, chat_id: int, text: str) -> bool:
         return True
 
     # /bhul
-    if not is_owner:
-        tg_api.send_message(chat_id, "Ye sirf owner kar sakta hai.")
+    if not (is_owner or is_group_admin):
+        tg_api.send_message(chat_id, "Ye sirf owner/admin kar sakta hai.")
         return True
     try:
         n = int(arg)

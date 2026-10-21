@@ -75,7 +75,8 @@ class GenerateMmTests(unittest.TestCase):
         r = ai_engine.AIRouter.__new__(ai_engine.AIRouter)
         r.providers = []
         if gemini_keys:
-            r.providers.append(ai_engine._Provider("gemini", "gemini-x", gemini_keys))
+            r.providers.append(ai_engine._Provider("gemini", "gemini-x",
+                                                  gemini_keys, "vision"))
         return r
 
     def test_mm_uses_gemini_only(self):

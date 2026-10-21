@@ -39,6 +39,9 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 GEMINI_KEYS = _split("GEMINI_KEYS")
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_KEY", "").strip()
+# v4.1: Mercury (Inception Labs diffusion LLM) — text-only provider.
+# OpenAI-compatible endpoint; multiple keys supported (one per line).
+MERCURY_KEYS = _split("MERCURY_KEYS")
 MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
 
 # --- People / roles ---
@@ -54,6 +57,24 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip() or secrets.token_u
 DB_NAME = os.environ.get("DB_NAME", "rk_agent").strip() or "rk_agent"
 DEFAULT_MODEL = (
     os.environ.get("DEFAULT_MODEL", "gemini-3.5-flash-lite").strip()
+    or "gemini-3.5-flash-lite"
+)
+# v4.1 MULTI-PROVIDER: owner panel me text / vision alag-alag select hote
+# hain. Mercury text-only hai (photo/audio NAHI dekh sakta) — media wale
+# messages hamesha vision-capable provider (Gemini) se jawab dete hain.
+#   - TEXT: jo provider/model owner ne panel me chuna (default: mercury-3,
+#     kyunki Mercury 3 fastest+strongest hai; failover gemini/deepseek pe)
+#   - VISION: photo/voice/video ke liye alag provider+model (default:
+#     gemini-3.5-flash-lite)
+MERCURY_MODEL = (
+    os.environ.get("MERCURY_MODEL", "mercury-3").strip() or "mercury-3"
+)
+# Mercury reasoning depth: low | medium | high (chat speed vs quality).
+MERCURY_REASONING = (
+    os.environ.get("MERCURY_REASONING", "medium").strip().lower() or "medium"
+)
+DEFAULT_VISION_MODEL = (
+    os.environ.get("DEFAULT_VISION_MODEL", "gemini-3.5-flash-lite").strip()
     or "gemini-3.5-flash-lite"
 )
 POLL_TIMEOUT = _int("POLL_TIMEOUT", 50)

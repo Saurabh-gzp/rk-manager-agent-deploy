@@ -28,6 +28,17 @@ _MAX_REPLY = 800
 _TEACH_COMMANDS = {"sikhao", "sikhai", "bhulo"}
 
 
+def _is_group_admin(chat_id: int, uid: int) -> bool:
+    """Live Telegram check: group creator/administrator? (v4.1 multi-admin)"""
+    if not chat_id or not uid:
+        return False
+    try:
+        member = tg_api.get_chat_member(chat_id, uid) or {}
+        return member.get("status") in ("creator", "administrator")
+    except Exception:
+        return False
+
+
 def get_teachings() -> list[dict]:
     value = get_state(_KEY, [])
     if not isinstance(value, list):
@@ -108,10 +119,14 @@ def handle_teach_command(msg: dict, uid: int, chat_id: int) -> bool:
         return False
     args = parts[1].strip() if len(parts) > 1 else ""
     mid = msg.get("message_id")
-    is_owner = bool(uid) and uid == config.OWNER_CHAT_ID
+    # v4.1 multi-admin: owner, configured admin, YA live group admin
+    is_owner = bool(uid) and (uid == config.OWNER_CHAT_ID
+                              or (config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID))
+    if not is_owner and chat_id and _is_group_admin(chat_id, uid):
+        is_owner = True
 
     if not is_owner:
-        _say_reply(chat_id, "❌ Bot ko sirf owner sikha sakta hai.", mid)
+        _say_reply(chat_id, "❌ Bot ko sirf owner/admin sikha sakta hai.", mid)
         return True
 
     if cmd == "sikhao":

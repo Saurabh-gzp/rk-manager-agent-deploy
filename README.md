@@ -1,11 +1,34 @@
-# RK Manager Agent 🤖 v4.0 TRUTH AGENT
+# RK Manager Agent 🤖 v4.1 MULTI-PROVIDER + MERCURY 3
 
 Advanced Telegram AI agent — manages your **channel + group**, learns from
 chats, replies from learned content, and acts like a real group manager.
-**v4.0 adds a REAL-TIME TRUTH LAYER**: every channel post the bot talks
-about is verified against the LIVE channel before the user ever sees it.
+**v4.1 adds Mercury 3 (Inception Labs) as a full AI provider** with
+owner-switchable text/vision providers + multi-admin support.
 
-## v4.0 TRUTH AGENT kit (owner's last-chance list — all 8 issues)
+## v4.1 MULTI-PROVIDER kit (owner request: Mercury 3 add + provider switch + group admins)
+
+Owner ke live issues — root cause + fix + tests (362 total pass):
+
+| Issue (live) | Root cause | Fix |
+|---|---|---|
+| **"Bot utna powerful nahi — Gemini old/stale message deta hai, dumb answering karta hai"** | Ek hi provider (Gemini flash-lite) sab kuch answer karta tha; owner ke paas koi control nahi tha kaunsa model jawab de | **Mercury 3 (Inception Labs) provider added** — OpenAI-compatible `api.inceptionlabs.ai`, model `mercury-3` (1M context, 1000+ tok/s diffusion LLM, reasoning_effort support). Multi-key pool + backoff sab waise hi. **Owner panel me ab `🤖 Text AI` + `👁 Vision AI` buttons** — provider choose karo (Mercury/Gemini/DeepSeek), phir model choose karo (live model list). Selection DB me save hoti hai, turant apply |
+| **"Mercury 3 text-only hai — user photo/audio bheje to usko bhi response mile"** | — | **Auto vision routing (built-in)**: photo/voice/video messages HAMESHA vision-capable provider se answer hote hain (`generate_mm`) — text-only Mercury select hone par bhi media ka jawab Vision AI (Gemini) se aata hai. Vision provider+model alag se selectable (default `gemini-3.5-flash-lite`) |
+| **"Selected provider down ho gaya to?"** | — | **Failover**: owner-selected provider pehle try hota hai; fail hone par baaki providers khud try karte hain — bot kabhi down nahi hota |
+| **"Group ke owner/admins ke commands follow hi nahi karta — sirf given owner id ko follow karta hai"** | Permission checks hardcoded `OWNER_CHAT_ID` pe the — Telegram group ke asli creator/administrators ko privileged nahi mana jaata tha (AI prompts bhi 'sirf owner' bolte the) | **v4.1 MULTI-ADMIN**: live Telegram role (`getChatMember` → creator/administrator) ab sab jagah privileged — RULE: lines, `/yaad` `/bhul` `/sikhao` `/users`, mod tools, AI instruction authority. Prompts ab group ke owner/ADMINS ke commands binding maante hain; members ka refusal fact intact |
+| **"Old deleted channel data bhi users ko de deta hai"** | v4.0 truth layer already verifies links | v4.0 truth layer intact (answer-gate + 30-min sweep + delivery-probe purge) + Mercury 3 ke 1M context ke saath grounding prompts zinda |
+
+Env knobs (naye): `MERCURY_KEYS` (multi-line), `MERCURY_MODEL`
+(`mercury-3`), `MERCURY_REASONING` (`medium`), `DEFAULT_VISION_MODEL`
+(`gemini-3.5-flash-lite`).
+
+Owner panel flow:
+1. Bot ko DM me `/start` bhejo → Control Panel
+2. `🤖 Text AI` → provider (✅ Mercury 3) → model (✅ mercury-3)
+3. `👁 Vision AI` → provider (Gemini) → model (✅ gemini-3.5-flash-lite)
+4. Panel pe neeche current selection hamesha dikhti hai; `🔑 API Keys` me
+   Mercury keys bhi test hote hain
+
+## v4.0 TRUTH AGENT (previous)
 
 Owner ke live issues — root cause + fix + tests (335 total pass):
 

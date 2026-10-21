@@ -53,9 +53,27 @@ def _answer(cb_id, text=None, show_alert=False):
 PANEL_TEXT = (
     "🎛 RK Manager Control Panel\n"
     "─────────────────────\n"
-    "Yahan se group/channel manage karo, model + AI keys control karo,\n"
+    "Yahan se group/channel manage karo, AI provider/model control karo,\n"
     "ya memory cleanup chala do. Sab kuch buttons se."
 )
+
+
+def _ai_status_line() -> str:
+    """Panel ke niche current text/vision AI selection dikhata hai."""
+    try:
+        router = ai_engine.get_router()
+        tp, tm = router.get_text_selection()
+        tp_label = ai_engine.PROVIDER_LABELS.get(tp, tp)
+        line = f"🤖 Text: {tp_label} · {tm}"
+        try:
+            vp, vm = router.get_vision_selection()
+            vp_label = ai_engine.PROVIDER_LABELS.get(vp, vp)
+            line += f"\n👁 Vision (photo/audio): {vp_label} · {vm}"
+        except Exception:
+            line += "\n👁 Vision: koi provider nahi (Gemini key add karo)"
+        return line
+    except Exception:
+        return "🤖 Text: koi AI provider nahi\n👁 Vision: koi AI provider nahi"
 
 
 def panel_keyboard() -> dict:
@@ -63,9 +81,10 @@ def panel_keyboard() -> dict:
         [{"text": "➕ Group Admin", "callback_data": "p:group"},
          {"text": "➕ Channel Admin", "callback_data": "p:channel"}],
         [{"text": "🔗 Link Group ↔ Channel", "callback_data": "p:link"}],
-        [{"text": "🤖 Choose Model", "callback_data": "p:model"},
-         {"text": "🔑 API Keys", "callback_data": "p:keys"}],
-        [{"text": "🧠 Memory Cleanup", "callback_data": "p:memory"}],
+        [{"text": "🤖 Text AI", "callback_data": "p:ai_text"},
+         {"text": "👁 Vision AI", "callback_data": "p:ai_vision"}],
+        [{"text": "🔑 API Keys", "callback_data": "p:keys"},
+         {"text": "🧠 Memory Cleanup", "callback_data": "p:memory"}],
         [{"text": "➕ Add bot to group", "callback_data": "p:addgroup"},
          {"text": "➕ Add bot to channel", "callback_data": "p:addchannel"}],
         [{"text": "📊 Stats", "callback_data": "p:stats"},
@@ -80,7 +99,8 @@ def handle_start(msg) -> bool:
     if not _is_owner(uid):
         _send(chat_id, "Ye bot RK Manager ka control panel hai. Owner-only 🙂")
         return True
-    _send(chat_id, PANEL_TEXT, reply_markup=panel_keyboard())
+    _send(chat_id, PANEL_TEXT + "\n\n" + _ai_status_line(),
+          reply_markup=panel_keyboard())
     return True
 
 
@@ -455,9 +475,186 @@ def handle_callback(cb) -> bool:
         _answer(cb_id)
         return True
 
-    # ---------- model chooser ----------
+    # ---------- v4.1 AI selection: text provider/model ----------
+
+    if action == "ai_text":
+        router = ai_engine.get_router()
+        avail = router.text_providers()
+        if not avail:
+            _edit(chat_id, message_id,
+                  "🤖 Koi AI provider configured nahi.\n"
+                  "GEMINI_KEYS / MERCURY_KEYS env var set karo.",
+                  reply_markup=_back())
+            _answer(cb_id)
+            return True
+        try:
+            cur_prov, cur_model = router.get_text_selection()
+        except Exception:
+            cur_prov, cur_model = "-", "-"
+        rows = []
+        for name in avail:
+            label = ai_engine.PROVIDER_LABELS.get(name, name)
+            mark = "✅" if name == cur_prov else "⬜"
+            note = " \u2022 text only" if name != "gemini" else " \u2022 text+vision"
+            rows.append([{"text": f"{mark} {label}{note}",
+                          "callback_data": f"p:ai_textp:{name}"}])
+        rows.append([{"text": "⬅️ Back", "callback_data": "p:back"}])
+        text = (
+            "🤖 Text AI — provider choose karo\n\n"
+            "Ye provider group/chat ke TEXT messages ka jawab dega.\n"
+            f"Current: {ai_engine.PROVIDER_LABELS.get(cur_prov, cur_prov)} · {cur_model}\n\n"
+            "ℹ️ Agar selected provider fail ho to bot khud dusre\n"
+            "providers par failover kar deta hai — bot kabhi down nahi hota."
+        )
+        _edit(chat_id, message_id, text, reply_markup={"inline_keyboard": rows})
+        _answer(cb_id)
+        return True
+
+    if action.startswith("ai_textp:"):
+        prov = action[len("ai_textp:"):]
+        router = ai_engine.get_router()
+        if not router.prov(prov):
+            _edit(chat_id, message_id, "Ye provider available nahi.",
+                  reply_markup=_back())
+            _answer(cb_id)
+            return True
+        models = ai_engine.list_models_for(prov)
+        if not models:
+            models = [router.prov(prov).model]
+        current = ai_engine.get_text_model(prov)
+        rows = []
+        for m in models[:25]:
+            label = f"{'✅' if m == current else '⬜'} {m}"
+            rows.append([{"text": label, "callback_data": f"p:ai_textm:{prov}:{m}"}])
+        rows.append([{"text": "⬅️ Providers", "callback_data": "p:ai_text"}])
+        rows.append([{"text": "⬅️ Back", "callback_data": "p:back"}])
+        label = ai_engine.PROVIDER_LABELS.get(prov, prov)
+        hint = ("\nℹ️ Mercury text-only hai — photo/audio wale messages\n"
+                "automatically Vision AI provider se answer honge." if prov != "gemini"
+                else "")
+        _edit(chat_id, message_id,
+              f"🤖 Text AI — {label} ka model choose karo\nCurrent: {current}{hint}",
+              reply_markup={"inline_keyboard": rows})
+        _answer(cb_id)
+        return True
+
+    if action.startswith("ai_textm:"):
+        # p:ai_textm:<provider>:<model>
+        rest = action[len("ai_textm:"):]
+        prov, _, model = rest.partition(":")
+        model = model.strip() or rest
+        router = ai_engine.get_router()
+        if not router.prov(prov):
+            _edit(chat_id, message_id, "Ye provider available nahi.",
+                  reply_markup=_back())
+            _answer(cb_id)
+            return True
+        ai_engine.set_text_model(prov, model)
+        ai_engine.set_text_provider(prov)
+        router.prov(prov).model = model
+        label = ai_engine.PROVIDER_LABELS.get(prov, prov)
+        _edit(chat_id, message_id,
+              f"✅ Text AI set ho gaya:\n{label} · {model}\n\n{_ai_status_line()}",
+              reply_markup=_back())
+        _answer(cb_id, f"Text AI: {model} ✅")
+        return True
+
+    # ---------- v4.1 AI selection: vision provider/model ----------
+
+    if action == "ai_vision":
+        router = ai_engine.get_router()
+        avail = router.vision_providers()
+        if not avail:
+            _edit(chat_id, message_id,
+                  "👁 Vision ke liye koi provider nahi.\n"
+                  "Photo/voice/video ke jawab ke liye Gemini key chahiye\n"
+                  "(Mercury text-only hai). GEMINI_KEYS env var set karo.",
+                  reply_markup=_back())
+            _answer(cb_id)
+            return True
+        try:
+            cur_prov, cur_model = router.get_vision_selection()
+        except Exception:
+            cur_prov, cur_model = "-", "-"
+        if len(avail) == 1:
+            # sirf ek vision provider — seedha model list dikhao
+            prov = avail[0]
+            models = ai_engine.list_models_for(prov)
+            current = cur_model
+            rows = []
+            for m in models[:25]:
+                label = f"{'✅' if m == current else '⬜'} {m}"
+                rows.append([{"text": label,
+                              "callback_data": f"p:ai_vism:{prov}:{m}"}])
+            rows.append([{"text": "⬅️ Back", "callback_data": "p:back"}])
+            _edit(chat_id, message_id,
+                  f"👁 Vision AI — {ai_engine.PROVIDER_LABELS.get(prov, prov)}\n"
+                  f"Photo/audio/video messages is model se answer honge.\n"
+                  f"Current: {current}",
+                  reply_markup={"inline_keyboard": rows})
+            _answer(cb_id)
+            return True
+        rows = []
+        for name in avail:
+            label = ai_engine.PROVIDER_LABELS.get(name, name)
+            mark = "✅" if name == cur_prov else "⬜"
+            rows.append([{"text": f"{mark} {label}",
+                          "callback_data": f"p:ai_visp:{name}"}])
+        rows.append([{"text": "⬅️ Back", "callback_data": "p:back"}])
+        _edit(chat_id, message_id,
+              "👁 Vision AI — provider choose karo\n"
+              "Photo/audio/video messages isi se answer honge.\n"
+              f"Current: {ai_engine.PROVIDER_LABELS.get(cur_prov, cur_prov)} · {cur_model}",
+              reply_markup={"inline_keyboard": rows})
+        _answer(cb_id)
+        return True
+
+    if action.startswith("ai_visp:"):
+        prov = action[len("ai_visp:"):]
+        router = ai_engine.get_router()
+        if prov not in router.vision_providers():
+            _edit(chat_id, message_id, "Ye vision provider available nahi.",
+                  reply_markup=_back())
+            _answer(cb_id)
+            return True
+        models = ai_engine.list_models_for(prov)
+        _, cur_model = router.get_vision_selection()
+        rows = []
+        for m in models[:25]:
+            label = f"{'✅' if m == cur_model else '⬜'} {m}"
+            rows.append([{"text": label, "callback_data": f"p:ai_vism:{prov}:{m}"}])
+        rows.append([{"text": "⬅️ Back", "callback_data": "p:ai_vision"}])
+        _edit(chat_id, message_id,
+              f"👁 Vision AI — {ai_engine.PROVIDER_LABELS.get(prov, prov)} ka model choose karo\n"
+              f"Current: {cur_model}",
+              reply_markup={"inline_keyboard": rows})
+        _answer(cb_id)
+        return True
+
+    if action.startswith("ai_vism:"):
+        # p:ai_vism:<provider>:<model>
+        rest = action[len("ai_vism:"):]
+        prov, _, model = rest.partition(":")
+        model = model.strip() or rest
+        router = ai_engine.get_router()
+        if prov not in router.vision_providers():
+            _edit(chat_id, message_id, "Ye vision provider available nahi.",
+                  reply_markup=_back())
+            _answer(cb_id)
+            return True
+        ai_engine.set_vision_selection(prov, model)
+        _edit(chat_id, message_id,
+              f"✅ Vision AI set ho gaya:\n{ai_engine.PROVIDER_LABELS.get(prov, prov)} · {model}\n\n{_ai_status_line()}",
+              reply_markup=_back())
+        _answer(cb_id, f"Vision AI: {model} ✅")
+        return True
+
+    # ---------- model chooser (legacy panel buttons) ----------
 
     if action == "model":
+        # purana 'Choose Model' button — Gemini chat model chunta tha;
+        # v4.1 me Gemini ka model = gemini TEXT model. Provider-wise list
+        # dikhate hain taaki purane panel messages bhi kaam karein.
         try:
             models = ai_engine.list_gemini_models()
         except Exception as exc:
@@ -468,24 +665,26 @@ def handle_callback(cb) -> bool:
             _edit(chat_id, message_id, "Pehle API keys add karo. 🔑", reply_markup=_back())
             _answer(cb_id)
             return True
-        current = get_state("model", config.DEFAULT_MODEL)
+        current = ai_engine.get_text_model("gemini")
         rows = []
         for m in models[:30]:
             label = f"{'✅ ' if m == current else '   '}{m}"
             rows.append([{"text": label, "callback_data": f"p:mset:{m}"}])
         rows.append([{"text": "⬅️ Back", "callback_data": "p:back"}])
-        _edit(chat_id, message_id, f"🤖 Model choose karo (current: {current})", reply_markup={"inline_keyboard": rows})
+        _edit(chat_id, message_id, f"🤖 Gemini model choose karo (current: {current})\n\n💡 Naya AI selector: '🤖 Text AI' / '👁 Vision AI' buttons use karo.", reply_markup={"inline_keyboard": rows})
         _answer(cb_id)
         return True
 
     if action.startswith("mset:"):
         m = action[len("mset:"):]
-        save_state("model", m)
-        # also update default model in running router's gemini provider
+        # v4.1: gemini ka text model + vision model dono sync (legacy
+        # single-model behavior)
+        ai_engine.set_text_model("gemini", m)
+        ai_engine.set_vision_selection("gemini", m)
         router = ai_engine.get_router()
-        for prov in router.providers:
-            if prov.name == "gemini":
-                prov.model = m
+        gp = router.prov("gemini")
+        if gp:
+            gp.model = m
         _edit(chat_id, message_id, f"✅ Model set: {m}", reply_markup=_back())
         _answer(cb_id, "Model set ✅")
         return True
@@ -529,9 +728,10 @@ def handle_callback(cb) -> bool:
             return True
         key = prov.pool.keys[idx - 1]
         try:
-            text = ai_engine._gemini_call(key, prov.model, "Reply with exactly: ok", None, 256, 30)[0] if prov.name == "gemini" else ai_engine._deepseek_call(key, prov.model, "Reply with exactly: ok", None, 256, 30)[0]
+            text, err = ai_engine.test_key(provider, key, prov.current_model())
             ok = bool(text) and "ok" in text.lower()
-            _edit(chat_id, message_id, f"🧪 Test [{provider}] {ai_engine.mask_key(key)}\n\nResult: {('✅ ' + text) if ok else '⚠️ unexpected: ' + (text or '(empty)')}", reply_markup=_back())
+            result = ("✅ " + text) if ok else ("⚠️ unexpected: " + (text or f"fail: {err[:150]}"))
+            _edit(chat_id, message_id, f"🧪 Test [{provider}] {ai_engine.mask_key(key)}\n\nResult: {result}", reply_markup=_back())
         except Exception as exc:
             _edit(chat_id, message_id, f"❌ Fail: {str(exc)[:200]}", reply_markup=_back())
         _answer(cb_id)
@@ -544,10 +744,7 @@ def handle_callback(cb) -> bool:
         for prov in router.providers:
             for k in prov.pool.keys:
                 try:
-                    if prov.name == "gemini":
-                        text, _ = ai_engine._gemini_call(k, prov.model, "Reply: ok", None, 256, 30)
-                    else:
-                        text, _ = ai_engine._deepseek_call(k, prov.model, "Reply: ok", None, 256, 30)
+                    text, err = ai_engine.test_key(prov.name, k, prov.current_model())
                     if text and "ok" in text.lower():
                         ok += 1
                     else:
@@ -674,7 +871,9 @@ def handle_callback(cb) -> bool:
     # ---------- back ----------
 
     if action == "back":
-        _edit(chat_id, message_id, PANEL_TEXT, reply_markup=panel_keyboard())
+        _edit(chat_id, message_id,
+              PANEL_TEXT + "\n\n" + _ai_status_line(),
+              reply_markup=panel_keyboard())
         _answer(cb_id)
         return True
 

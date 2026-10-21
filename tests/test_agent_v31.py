@@ -366,7 +366,7 @@ class MemberInstructionFactTests(IMDBTestCase):
     def test_member_standing_instruction_gets_refusal_fact(self):
         prompt = self._answer("ye lo link — isko bhija kar koi puche tab", 555)
         self.assertIn("MEMBER ka hai", prompt)
-        self.assertIn("boss (owner) set karte hain", prompt)
+        self.assertIn("owner/admins set karte hain", prompt)
 
     def test_member_normal_question_no_fact(self):
         prompt = self._answer("bgmi ka naya update kab aayega?", 555)

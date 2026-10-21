@@ -18,6 +18,8 @@ services:
         sync: false
       - key: GEMINI_KEYS
         sync: false
+      - key: MERCURY_KEYS
+        sync: false
       - key: DEEPSEEK_KEY
         sync: false
       - key: MONGODB_URI

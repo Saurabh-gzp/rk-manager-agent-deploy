@@ -14,6 +14,17 @@ from moderation import _say_reply
 _PUBLIC_COMMANDS = {"help", "id", "stats", "files", "report"}
 _OWNER_COMMANDS = {"users"}
 
+
+def _live_group_admin(chat_id: int, uid: int) -> bool:
+    """v4.1 multi-admin: live Telegram group creator/administrator check."""
+    if not chat_id or not uid:
+        return False
+    try:
+        member = tg_api.get_chat_member(chat_id, uid) or {}
+        return member.get("status") in ("creator", "administrator")
+    except Exception:
+        return False
+
 BOT_COMMANDS_PUBLIC = [
     {"command": "ask", "description": "Bot se kuch bhi pucho"},
     {"command": "help", "description": "Saare commands ki list"},
@@ -112,11 +123,12 @@ def handle_public_command(msg: dict, uid: int, chat_id: int) -> bool:
     mid = msg.get("message_id")
     issuer = msg.get("from") or {}
 
-    # ---- /users (owner only) — users list with activity ----
+    # ---- /users (owner + group admins) — users list with activity ----
     if cmd == "users":
         if not (uid == config.OWNER_CHAT_ID
-                or (config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID)):
-            _say_reply(chat_id, "❌ Ye sirf owner dekh sakta hai.", mid)
+                or (config.ADMIN_CHAT_ID and uid == config.ADMIN_CHAT_ID)
+                or _live_group_admin(chat_id, uid)):
+            _say_reply(chat_id, "❌ Ye sirf owner/admin dekh sakta hai.", mid)
             return True
         lines = list_users()
         _say_reply(chat_id, "\n".join(lines), mid)

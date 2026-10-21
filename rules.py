@@ -60,7 +60,7 @@ def rules_block() -> str:
     rules = get_rules()
     if not rules:
         return ""
-    lines = ["STANDING INSTRUCTIONS FROM THE OWNER — highest priority. "
-             "Follow these EXACTLY, never improvise the opposite:"]
+    lines = ["STANDING INSTRUCTIONS FROM THE OWNER/ADMINS — highest "
+             "priority. Follow these EXACTLY, never improvise the opposite:"]
     lines.extend(f"{i}. {r['rule']}" for i, r in enumerate(rules, 1))
     return "\n".join(lines)
